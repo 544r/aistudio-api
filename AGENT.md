@@ -158,7 +158,7 @@ uv run python3 main.py server --port 8080
 | **Python 代码风格与 Lint** | `uv run ruff check .` | 0 errors |
 | **Python 代码格式化** | `uv run ruff format --check .` | 72 files already formatted |
 | **Python 类型检查** | `bun x pyright src tests` | 0 errors |
-| **Python 单元测试** | `uv run pytest` | 全部通过 (191 passed) |
+| **Python 单元测试** | `uv run pytest` | 全部通过 (221 passed) |
 | **浏览器 JS 语法校验** | `for f in src/aistudio_api/infrastructure/browser/js/*.js; do bun build "$f" --no-bundle >/dev/null; done` | 0 errors |
 | **前端代码规范** | `cd web && bun run lint` | 0 errors, 0 warnings |
 | **前端类型检查** | `cd web && bun run type-check` | 0 errors |
@@ -176,12 +176,13 @@ uv run python3 main.py server --port 8080
 
 > [!IMPORTANT]
 > 1. **原子化文件持久化**：所有持久化文件（`registry.json`、`auth.json`、`meta.json` 等）操作必须使用 `account_store._atomic_write_json`（写入临时文件后通过 `os.replace` 原子替换），防止并发写入截断。
-> 2. **账号切换排干机制**：切换账号时通过 `BrowserSession.request_scope()` 追踪在途请求，等待进行中的流式请求完成后再清理上下文。
-> 3. **缓存与模板隔离**：账号切换、429 限流或 403 鉴权重试时，调用 `client.clear_templates()`，避免跨账号复用请求模板。快照签名按每次请求哈希实时生成，绝不跨请求共享。
-> 4. **鉴权故障快速隔离与自愈**：当遇到 `The caller does not have permission` (403) 时，立即将当前账号置入 `auth_cooldown` 并快速故障转移至健康账号；单账号或备用号耗尽时自动触发在位强制刷新与 BotGuard 重握手自愈。
-> 5. **无全局 DOM 污染**：页面内 JavaScript 交互使用局部闭包 `Promise` 返回数据，不在 `window` 对象上遗留全局共享状态。
-> 6. **Cookie 智能精简与天然协商**：外部导入 Cookie 时自动过滤旧设备或跨 IP 绑定的易腐败凭据（`OSID`、`__Secure-OSID`、`SIDCC` 及 `_ga` 等追踪标记），保留核心认证项（`SID`、`SAPISID`、`1PSIDTS`）。浏览器访问 AI Studio 时自动协商出绑定当前网络/TLS 的全新有效 `OSID`，杜绝 403 权限拒绝。
-> 7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制以保障 Android 低 RAM 运行；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
+2. **蓝绿会话平滑热切与就绪门机制**：切换账号时，`BrowserSession` 在后台创建独立新标签页，注入 Cookie、完成页面导航与 BotGuard 握手验证；验证通过后原子翻转 `SessionReadinessGate` 并将新上下文设为就绪。旧会话上下文加入退休队列，优雅等待在途流式请求排干（`decr_in_flight()` 触发 `drain_event`）后再行关闭，保障流式请求平滑过渡零中断。
+3. **缓存与模板隔离**：账号切换、429 限流或 403 鉴权重试时，调用 `client.clear_templates()`，避免跨账号复用请求模板。快照签名按每次请求哈希实时生成，绝不跨请求共享。初次握手截获基线模板后，任意目标模型通过 `capture_template(model)` 纯内存动态适配参数。
+4. **鉴权故障快速隔离与自愈**：当遇到 `The caller does not have permission` (403) 时，立即将当前账号置入 `auth_cooldown` 并快速故障转移至健康账号；单账号或备用号耗尽时自动触发在位强制刷新与 BotGuard 重握手自愈。
+5. **无全局 DOM 污染**：页面内 JavaScript 交互使用局部闭包 `Promise` 返回数据，不在 `window` 对象上遗留全局共享状态。
+6. **Cookie 智能精简与天然协商**：外部导入 Cookie 时自动过滤旧设备或跨 IP 绑定的易腐败凭据（`OSID`、`__Secure-OSID`、`SIDCC` 及 `_ga` 等追踪标记），保留核心认证项（`SID`、`SAPISID`、`1PSIDTS`）。浏览器访问 AI Studio 时自动协商出绑定当前网络/TLS 的全新有效 `OSID`，杜绝 403 权限拒绝。
+7. **真实环境伪装与低内存协同**：保留 `--renderer-process-limit=1`、`--in-process-gpu` 与 128MB V8 内存限制以保障 Android 低 RAM 运行；移除 `--disable-software-rasterizer` 并启用 `--use-gl=angle --use-angle=swiftshader` 恢复软件 WebGL 上下文，保留 `--mute-audio` 并移除 `--disable-audio` 保护 AudioContext；统一注入 `--fingerprint-platform=windows` 伪装为 Windows 桌面环境，并通过原生 `--fingerprint-timezone` 与 Wire 协议层保持时区/位置严格一致。
+8. **账号接口解耦与 SPA 缓存隔离**：对外标准 REST 接口统一位于 `/api/accounts`（保持 `/accounts` 向下兼容），并在 SPA 单页应用与 API 响应中下发 `Vary: Accept` 与 `Cache-Control: no-store`，杜绝浏览器与代理网关发生缓存错乱。
 
 ## 5. 代码结构索引
 
@@ -212,14 +213,16 @@ aistudio-api/
 │   │   ├── routes_gemini.py       # /v1beta/models/*:generateContent 路由
 │   │   ├── routes_models.py       # /v1beta/models 模型发现路由
 │   │   ├── routes_accounts.py     # 账号管理与探活路由
-│   │   ├── routes_system.py       # 监控指标与 config.yaml 热重载路由
+│   │   ├── routes_system.py       # 监控指标、日志配置与 config.yaml 热重载路由
+│   │   ├── state.py               # 运行时全局单例容器 (RuntimeState)
+│   │   ├── schemas.py             # API 请求与校验模型
+│   │   ├── responses.py           # Gemini API 响应格式化辅助工具
 │   │   └── response_models.py     # API Pydantic 响应模型
 │   ├── application/               # 业务应用层
 │   │   ├── account_rotator.py     # 黏性账号调度器 (按模型记录 429 与太平洋午夜重置)
 │   │   ├── account_service.py     # 账号存储与激活上下文协调
 │   │   ├── api_service_gemini.py  # Gemini 请求生命周期与流式处理
 │   │   ├── account_orchestrator.py# _switch_lock 防雪崩切号与故障转移编排
-│   │   ├── api_service.py         # 应用层对外统一导出
 │   │   └── chat_service.py        # 消息规范化与多模态数据处理
 │   ├── domain/                    # 纯净领域模型与异常体系
 │   │   ├── errors.py              # 业务异常定义 (AuthError, UsageLimitExceeded 等)
@@ -227,13 +230,13 @@ aistudio-api/
 │   ├── infrastructure/            # 基础设施层
 │   │   ├── account/               # Cookie 解析、会话刷新与凭据持久化 (account_store, cookie_parser)
 │   │   ├── browser/               # 异步 CDP 客户端与 CloakBrowser 进程管理 (cdp_client, browser_engine)
-│   │   └── gateway/               # Wire Codec/Parser、流式管道 (streaming, transport)、重放与模型发现
+│   │   └── gateway/               # 会话状态机 (session_state)、蓝绿就绪门 (session)、鉴权凭据 (session_auth)、WAA探针 (botguard_bootstrap)、Wire编解码与流式管道
 ├── config.yaml                    # 模型规则与工具默认行为配置 (支持在线热重载)
 ├── main.py                        # 本地统一启动入口
 └── tests/                        # 单元测试套件 (模块化轻量架构，全量通过 <5s)
 │   ├── conftest.py               # 气密性隔离配置 (monkeypatch AISTUDIO_* 数据目录)
 │   ├── fixtures/                 # 真实 Protobuf JSON 请求与响应报文
-│       └── unit/                     # 22 个按职责严格划分的单元测试模块
+│       └── unit/                     # 25 个按职责严格划分的单元测试模块
 │       ├── test_account_*        # 账号调度、并发轮换防雪崩与凭据导入
 │       ├── test_api_*            # API 鉴权、响应序列化与模型/系统路由
 │       ├── test_browser_*        # Chromium 进程看门狗、CDP 会话与页面生命周期

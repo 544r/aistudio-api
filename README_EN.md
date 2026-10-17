@@ -25,9 +25,9 @@
 - [Features](#features)
 - [Architecture & Documentation](#architecture--documentation)
 - [Quick Start](#quick-start)
-  - [Prerequisites](#prerequisites)
-  - [Linux / macOS / Windows](#linux--macos--windows)
   - [Android (Termux)](#android-termux)
+  - [Windows](#windows)
+  - [Linux / macOS](#linux--macos)
   - [Docker Deployment](#docker-deployment)
 - [Configuration & Environment Variables](#configuration--environment-variables)
 - [API Usage Examples](#api-usage-examples)
@@ -46,7 +46,7 @@
 |---|---|
 | **Gemini API Compatibility** | Supports `/v1beta/...` endpoints including Thinking, multimodal inputs, function calling, and image generation |
 | **Dynamic Model Discovery** | Automatically synchronizes and discovers available models from upstream Google AI Studio |
-| **Sticky Account Dispatch** | Maintains account state per model, tracks 429 rate-limit quotas & 403 authorization isolation independently, and resets cooldowns at midnight Pacific Time |
+| **Multi-Account Rotation** | Manages multiple accounts with automatic failover, tracks 429 rate limits per model independently, and resets quotas at midnight Pacific Time |
 | **Runtime State Persistence** | Model usage statistics (`stats.json`) and account 429 cooldown & quota status (`rotator_state.json`) are automatically persisted to disk across restarts |
 | **Downstream Parameter Fault Tolerance** | `drop_unsupported_params` automatically drops unsupported safety categories (e.g. `HARM_CATEGORY_CIVIC_INTEGRITY`) and tools to prevent 400 errors |
 | **Multi-Account Probing** | Extracts and verifies sub-accounts (`u/0`, `u/1`...) automatically when importing a multi-session Cookie |
@@ -92,70 +92,96 @@ Technical reference documentation:
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+
-- [`uv`](https://docs.astral.sh/uv/) package manager (recommended)
-- Browser: Requires [CloakBrowser](https://github.com/CloakHQ/cloakbrowser) for fingerprint cloaking and process isolation (Edge and generic Chrome are not supported)
-
-### Windows
-
-```bat
-# 1. Clone repository
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 2. Sync dependencies
-uv sync
-
-# 3. Install CloakBrowser (first run only)
-scripts\install-browser.bat
-
-# 4. Start server
-uv run python main.py server --port 8080
-```
-
-### Linux / macOS
-
-```bash
-# 1. Clone repository
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 2. Sync dependencies
-uv sync
-
-# 3. Install CloakBrowser (first run only)
-bash scripts/setup-browser.sh
-
-# 4. Start server
-uv run python3 main.py server --port 8080
-```
-
-> [!TIP]
-> Using `uv sync` ensures exact wheel resolution across platforms and prevents compilation issues.
-
 ### Android (Termux)
 
-On Termux, Chromium runs inside a lightweight `proot-distro` Ubuntu container to resolve Glibc/Bionic compatibility:
+> [!TIP]
+> **Download Notice**: Always install Termux from [F-Droid](https://f-droid.org/packages/com.termux/) or [GitHub Releases](https://github.com/termux/termux-app/releases). **Do NOT install from the Google Play Store** (the Play Store build is obsolete and will produce repository update errors).
+
+Open Termux and run the following commands step by step:
 
 ```bash
-# 1. Setup environment and sync dependencies
+# Step 1: Update Termux environment and install git
+pkg update -y && pkg install -y git
+
+# Step 2: Clone repository and enter directory
 git clone https://github.com/DeconstructedCube/aistudio-api.git
 cd aistudio-api
+
+# Step 3: Initialize Python environment & sync dependencies (auto-resolves prebuilt Android wheels)
 bash scripts/setup-env.sh
 uv sync
 
-# 2. Setup managed browser runtime (run once)
+# Step 4: Setup managed CloakBrowser runtime (first run only, takes ~1-2 min)
 bash scripts/setup-browser.sh
 
-# 3. Start server
+# Step 5: Start server
+uv run python main.py server --port 8080
+```
+
+Once started:
+1. Open your phone's browser and go to **`http://localhost:8080`** to access the Web Console;
+2. Navigate to **Accounts**, paste your Google account Cookies or import a bundle to start using the API;
+3. **Background Persistence Tip**: Pull down Android's notification bar, tap `Acquire Wakelock` on Termux's notification, and disable battery optimization for Termux in phone system settings to prevent sleep kills.
+
+---
+
+### Windows
+
+Prerequisite: [Python 3.11+](https://www.python.org/downloads/) installed (check `Add python.exe to PATH` during setup).
+
+Open PowerShell or Windows Terminal:
+
+```bat
+# Step 1: Install uv package manager
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Step 2: Clone repository and enter directory
+git clone https://github.com/DeconstructedCube/aistudio-api.git
+cd aistudio-api
+
+# Step 3: Sync dependencies
+uv sync
+
+# Step 4: Install CloakBrowser (first run only)
+scripts\install-browser.bat
+
+# Step 5: Start server
+uv run python main.py server --port 8080
+```
+
+Open **`http://localhost:8080`** in your browser to access the Web Console.
+
+---
+
+### Linux / macOS
+
+Open a terminal and run:
+
+```bash
+# Step 1: Install uv package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Step 2: Clone repository and enter directory
+git clone https://github.com/DeconstructedCube/aistudio-api.git
+cd aistudio-api
+
+# Step 3: Sync dependencies
+uv sync
+
+# Step 4: Install CloakBrowser (first run only)
+bash scripts/setup-browser.sh
+
+# Step 5: Start server
 uv run python3 main.py server --port 8080
 ```
 
+Open **`http://localhost:8080`** in your browser to access the Web Console.
+
+---
+
 ### Docker Deployment
 
-Run with Docker CLI:
+CloakBrowser is bundled in the container image for immediate use:
 
 ```bash
 docker run -d \
@@ -166,11 +192,13 @@ docker run -d \
   ghcr.io/deconstructedcube/aistudio-api:latest
 ```
 
-Or with Docker Compose:
+Or run with Docker Compose:
 
 ```bash
 docker compose up -d
 ```
+
+Open **`http://localhost:8080`** in your browser to access the Web Console.
 
 ---
 
@@ -191,12 +219,18 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | Path to model rules and default tools configuration YAML |
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | Persist request and token usage metrics across service restarts |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | Persist account 429 rate limit dates & cooldowns across restarts |
-| `AISTUDIO_BROWSER_EXECUTABLE` | string | Auto | Path to CloakBrowser executable |
+| `AISTUDIO_BROWSER_EXECUTABLE` | string | Auto | Path to CloakBrowser executable (`/opt/cloakbrowser/chrome` in Docker) |
 | `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium remote debugging port (CDP) |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | Run Chromium in headless mode |
+| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | Browser idle reclamation timeout in seconds (900s on Termux, 1800s on Desktop; 0 disables) |
 | `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Dedicated proot-distro container name for Termux |
 | `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.7-flash` | Default text model |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | Default image generation model |
+| `AISTUDIO_TIMEZONE` | string | Auto | Browser fingerprint & Wire protocol timezone (`America/Los_Angeles` by default) |
+| `AISTUDIO_LOCALE` | string | `en-US` | Browser fingerprint locale |
+| `AISTUDIO_DUMP_REQUESTS` | bool | `false` | Dump API request/response exchanges to console logs (enabled via `DEBUG=1`) |
+| `AISTUDIO_DUMP_FILE` | bool | `false` | Dump request/response exchanges to individual disk files |
+| `AISTUDIO_DUMP_DIR` | string | `dumps/` | Target directory for dumped exchange files |
 
 ---
 
@@ -346,7 +380,7 @@ if response.function_calls:
 The service includes a built-in static Web Console served at `http://localhost:8080`:
 
 - **Dashboard**: Real-time view of service health, per-model request stats, success rates, and rate-limit cooldown status.
-- **Accounts**: Import Cookie credentials (single-line, JSON text, or uploaded bundle file / local file path), auto-probe multiple sub-accounts, switch active account, or manually reset cooldown.
+- **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits.
 - **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
 - **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`.
 

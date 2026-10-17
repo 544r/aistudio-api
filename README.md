@@ -25,9 +25,9 @@
 - [核心特性](#核心特性)
 - [技术架构与文档](#技术架构与文档)
 - [快速开始](#快速开始)
-  - [前置要求](#前置要求)
-  - [Linux / macOS / Windows](#linux--macos--windows)
   - [Android (Termux)](#android-termux)
+  - [Windows](#windows)
+  - [Linux / macOS](#linux--macos)
   - [Docker 部署](#docker-部署)
 - [配置与环境变量](#配置与环境变量)
 - [API 调用示例](#api-调用示例)
@@ -46,7 +46,7 @@
 |---|---|
 | **Gemini 协议兼容** | 支持 `/v1beta/...` 接口规范，包括 Thinking 思维链、多模态、Function Calling 工具调用及图片生成 |
 | **动态模型发现** | 自动向上游同步可用模型列表，支持 `gemini-3.7-flash`、`gemini-3.8-flash` 等最新模型 |
-| **多账号黏性调度** | 维护账号状态，支持按模型独立记录 429 配额与 403 鉴权异常隔离并在故障时自动切换，每日美西午夜自动重置配额 |
+| **多账号自动轮换** | 支持多账号管理与故障自动切换，按模型独立记录 429 配额，每日美西午夜自动重置 |
 | **运行状态持久化** | 模型调用量、Token 消耗统计 (`stats.json`) 以及账号 429 限额与冷却状态 (`rotator_state.json`) 自动落盘，容器/服务重启不丢失状态 |
 | **下游参数容错与丢弃** | 支持配置 `drop_unsupported_params` 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
@@ -92,69 +92,96 @@
 
 ## 快速开始
 
-### 前置要求
-
-- Python 3.11 及以上版本
-- 推荐安装 [`uv`](https://docs.astral.sh/uv/) 作为包管理工具
-- 浏览器环境：使用 [CloakBrowser](https://github.com/CloakHQ/cloakbrowser)（提供指纹伪装与反爬防护，不支持 Edge 或标准 Chrome）
-
-### Windows
-
-```bat
-# 1. 克隆代码仓库
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 2. 同步依赖
-uv sync
-
-# 3. 安装 CloakBrowser（仅首次需要）
-scripts\install-browser.bat
-
-# 4. 启动服务
-uv run python main.py server --port 8080
-```
-
-### Linux / macOS
-
-```bash
-# 1. 克隆代码仓库
-git clone https://github.com/DeconstructedCube/aistudio-api.git
-cd aistudio-api
-
-# 2. 同步依赖
-uv sync
-
-# 3. 安装 CloakBrowser（仅首次需要）
-bash scripts/setup-browser.sh
-
-# 4. 启动服务
-uv run python3 main.py server --port 8080
-```
-
-> [!TIP]
-> 推荐使用 `uv sync` 同步依赖，避免使用裸 `pip` 导致跨平台预编译二进制包解析不一致。
-
 ### Android (Termux)
 
-Termux 环境下由于 Bionic 与 Glibc ABI 差异，浏览器运行在轻量 `proot-distro` 容器内：
+> [!TIP]
+> **下载提示**：请务必从 [F-Droid](https://f-droid.org/packages/com.termux/) 或 [GitHub Releases](https://github.com/termux/termux-app/releases) 安装 Termux。**切勿使用 Google Play 商店版本**（Play 商店版本已停止维护，更新环境会报错）。
+
+打开 Termux，依次复制执行以下命令：
 
 ```bash
-# 1. 准备依赖环境与安装
+# 步骤 1：更新 Termux 基础环境并安装 git
+pkg update -y && pkg install -y git
+
+# 步骤 2：克隆代码仓库并进入目录
 git clone https://github.com/DeconstructedCube/aistudio-api.git
 cd aistudio-api
+
+# 步骤 3：初始化依赖环境（自动配置手机专属加速源，无需本地编译）
 bash scripts/setup-env.sh
 uv sync
 
-# 2. 准备受控浏览器运行时（仅首次执行）
+# 步骤 4：安装并配置受控浏览器（仅首次需要，耗时约 1~2 分钟）
 bash scripts/setup-browser.sh
 
-# 3. 启动服务
+# 步骤 5：启动服务
+uv run python main.py server --port 8080
+```
+
+启动成功后：
+1. 打开手机自带浏览器，访问 **`http://localhost:8080`** 即可进入 Web 管理控制台；
+2. 点击 **“账号管理”** 页面，粘贴你的 Google 账号 Cookie 或导入凭据包即可开始调用；
+3. **后台保活提示**：下拉手机通知栏，点击 Termux 通知项上的 `Acquire Wakelock`，并在手机系统设置中为 Termux 开启“无限制后台运行/电池优化白名单”，防止锁屏休眠被系统误杀。
+
+---
+
+### Windows
+
+前置要求：电脑已安装 [Python 3.11+](https://www.python.org/downloads/)（安装时勾选 `Add python.exe to PATH`）。
+
+打开 PowerShell 或终端，依次执行：
+
+```bat
+# 步骤 1：安装 uv 包管理工具
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 步骤 2：克隆代码仓库并进入目录
+git clone https://github.com/DeconstructedCube/aistudio-api.git
+cd aistudio-api
+
+# 步骤 3：同步安装项目依赖
+uv sync
+
+# 步骤 4：安装 CloakBrowser 浏览器（仅首次需要）
+scripts\install-browser.bat
+
+# 步骤 5：启动服务
+uv run python main.py server --port 8080
+```
+
+服务启动后，浏览器访问 **`http://localhost:8080`** 进入管理控制台。
+
+---
+
+### Linux / macOS
+
+打开终端，依次执行：
+
+```bash
+# 步骤 1：安装 uv 包管理工具
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 步骤 2：克隆代码仓库并进入目录
+git clone https://github.com/DeconstructedCube/aistudio-api.git
+cd aistudio-api
+
+# 步骤 3：同步安装项目依赖
+uv sync
+
+# 步骤 4：安装 CloakBrowser 浏览器（仅首次需要）
+bash scripts/setup-browser.sh
+
+# 步骤 5：启动服务
 uv run python3 main.py server --port 8080
 ```
+
+服务启动后，浏览器访问 **`http://localhost:8080`** 进入管理控制台。
+
+---
+
 ### Docker 部署
 
-使用官方 Docker 镜像直接启动：
+镜像已内置 CloakBrowser 运行时，支持开箱即用：
 
 ```bash
 docker run -d \
@@ -170,6 +197,8 @@ docker run -d \
 ```bash
 docker compose up -d
 ```
+
+启动后访问 **`http://localhost:8080`**（或服务器 IP 端口）进入管理控制台。
 
 ---
 
@@ -191,12 +220,18 @@ docker compose up -d
 | `AISTUDIO_CONFIG_FILE` | string | `config.yaml` | 模型规则与默认工具配置文件路径 |
 | `AISTUDIO_PERSIST_STATS` | bool | `true` | 是否持久化模型调用与 Token 统计（1=开启，0=关闭） |
 | `AISTUDIO_PERSIST_ROTATOR` | bool | `true` | 是否持久化账号 429 冷却与调度状态（1=开启，0=关闭） |
-| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径 |
+| `AISTUDIO_BROWSER_EXECUTABLE` | string | 自动探测 | 自定义 CloakBrowser 可执行文件路径（Docker 内为 `/opt/cloakbrowser/chrome`） |
 | `AISTUDIO_BROWSER_PORT` | int | `9222` | Chromium 远程调试端口 (CDP) |
 | `AISTUDIO_BROWSER_HEADLESS` | bool | `true` | 是否以无头模式运行 Chromium |
+| `AISTUDIO_BROWSER_IDLE_TIMEOUT` | int | `900` / `1800` | 浏览器空闲自动回收超时秒数（Termux 下默认 900s，桌面端 1800s，0 为禁用） |
 | `AISTUDIO_PROOT_NAME` | string | `aistudio-api` | Termux 环境下专用的 proot-distro 容器名称 |
 | `AISTUDIO_DEFAULT_TEXT_MODEL` | string | `gemini-3.7-flash` | 默认文本模型 |
 | `AISTUDIO_DEFAULT_IMAGE_MODEL` | string | `gemini-3.1-flash-image-preview` | 默认图像生成模型 |
+| `AISTUDIO_TIMEZONE` | string | 自动探测 | 受控浏览器指纹与 Wire 协议交互时区（默认 `America/Los_Angeles`） |
+| `AISTUDIO_LOCALE` | string | `en-US` | 受控浏览器区域语言 |
+| `AISTUDIO_DUMP_REQUESTS` | bool | `false` | 是否在终端转储每次 API 交互报文详情（支持 `DEBUG=1` 触发） |
+| `AISTUDIO_DUMP_FILE` | bool | `false` | 是否将请求与响应报文详情落盘保存 |
+| `AISTUDIO_DUMP_DIR` | string | `dumps/` | 报文转储保存目录 |
 ---
 
 ## API 调用示例
@@ -345,7 +380,7 @@ if response.function_calls:
 系统内置静态打包的 Web 前端管理控制台（访问 `http://localhost:8080`）：
 
 - **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
-- **账号管理 (Accounts)**：支持单行/JSON Cookie 文本导入、JSON 凭据包文件批量导入（支持文件上传或填入服务端本地绝对路径）、自动递归探活多账号、手动切换当前活跃账号或重置冷却。
+- **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
 - **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
 - **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫。
 

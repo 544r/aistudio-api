@@ -45,8 +45,11 @@ flowchart TD
     subgraph InfraLayer ["4. Infrastructure 基础设施层"]
         subgraph GatewaySub ["协议网关与编解码 (gateway/)"]
             Client["client.py<br/>AIStudioClient 统一门面"]
-            Session["session.py<br/>BrowserSession 会话管理与快照生成"]
-            CaptureSvc["capture.py<br/>模板捕获与单例管理"]
+            Session["session.py<br/>BrowserSession 协调与蓝绿管理"]
+            SessionState["session_state.py<br/>SessionState 状态机与就绪门"]
+            SessionAuth["session_auth.py<br/>Cookie 清洗与账号身份校验"]
+            BotGuardBootstrap["botguard_bootstrap.py<br/>WAA 探针握手与基线模板捕获"]
+            CaptureSvc["capture.py<br/>请求模板内存改写与单例"]
             WireCodec["wire_codec.py<br/>Protobuf-JSON 请求构造与重写"]
             WireParser["wire_parser.py<br/>Protobuf-JSON 响应解析器"]
             StreamParser["stream_parser.py<br/>增量流式 JSON 状态机解析器"]
@@ -55,6 +58,7 @@ flowchart TD
             ReplaySvc["replay.py<br/>页面内 XHR 重放服务"]
             ModelDisc["model_discovery.py<br/>动态模型发现与元数据获取"]
             ModelDefaults["model_defaults.py<br/>配置解析与 mtime 内存缓存"]
+            WireTypes["wire_types.py<br/>对话内容与 Part 实体契约"]
         end
         subgraph BrowserSub ["浏览器与 CDP 通信 (browser/)"]
             CDPClient["cdp_client.py<br/>纯 Python 异步 WebSocket CDP 客户端"]
@@ -121,17 +125,21 @@ flowchart TD
   - `js/`：浏览器端独立脚本，包含 Hook 注入、流式通信、快照签名与内存清理。
 - **网关与编解码子系统 (`gateway/`)**：
   - `client.py`：`AIStudioClient` 统一门面，组装请求重放、流式生成与会话生命周期。
-  - `session.py`：`BrowserSession` 会话管理器，负责页面导航、WAA 运行时保持及实时快照生成。
+  - `session.py`：`BrowserSession` 协调核心，管理会话生命周期、蓝绿标签页平滑热切及快照签名生成。
+  - `session_state.py`：会话状态机（`SessionState`）、就绪门（`SessionReadinessGate`）及上下文描述符（`SessionContext`），支持并发请求阻塞等待与瞬时唤醒。
+  - `session_auth.py`：Cookie 过滤清洗（剔除 `OSID`、`SIDCC` 冲突项）、登录页重定向感知、邮箱身份探测与凭据原子落盘。
+  - `botguard_bootstrap.py`：BotGuard WAA 握手、基础请求模板拦截与临时会话管理。
   - `wire_spec.py`：Protobuf-over-JSON (JSPB) 字段索引枚举与 `JspbArray` 稀疏容器定义。
-  - `wire_codec.py`：JSPB 请求结构组包与参数改写。
+  - `wire_codec.py`：JSPB 请求结构组包、参数动态改写与内置工具注入。
   - `wire_parser.py`：JSPB 响应解析器，处理 Struct 结构体、ListValue 数组与状态码映射。
-  - `stream_parser.py`：流式 JSON 增量状态机解析器，去除 XSSI 前缀并按深度解析数据分块。
+  - `wire_types.py`：领域数据结构契约（`AistudioContent`、`AistudioPart`、`AistudioGenerationConfig`）。
+  - `stream_parser.py`：流式 JSON 增量状态机解析器，去除 XSSI 前缀并按括号深度切片分块。
   - `transport.py`：基于 CDP Binding 的事件推送管道，支持队列反压控制与时间戳签名注入。
-  - `capture.py`：请求模板缓存与模型适配。
+  - `capture.py`：请求模板缓存与纯内存模型适配。
   - `replay.py`：页面上下文 XHR 请求重放与异常降级。
   - `streaming.py`：流式响应分发与异常映射。
   - `model_discovery.py`：可用模型列表动态探测与本地降级。
-  - `model_defaults.py`：模型默认规则解析与缓存。
+  - `model_defaults.py`：模型默认规则解析与 mtime 驱动的内存缓存。
 - **账号与持久化子系统 (`account/`)**：
   - `account_store.py`：账号凭据持久化存储（通过临时文件原子替换保障并发安全）。
   - `cookie_parser.py`：Cookie 格式解析、SAPISIDHASH 计算与多子账号探测。
@@ -163,11 +171,11 @@ sequenceDiagram
     APISvc->>Facade: stream_generate_content(...)
     
     Facade->>Capture: capture_request(prompt, model, images...)
-    opt 首次请求该模型或强制刷新
-        Capture->>Session: capture_template(model)
-        Session->>Page: 拦截模型请求基础模板 (URL, Headers, Wire结构)
-        Page-->>Session: 截断生成并返回模板元数据
-        Session-->>Capture: 缓存模板至 RequestCaptureService
+    opt 会话未就绪或模板缺失
+        Capture->>Session: ensure_ready() / capture_template(model)
+        Session->>Page: 握手并截获通用基础请求模板
+        Page-->>Session: 截断生成并返回基线模板 (URL, Headers, Wire结构)
+        Session-->>Capture: 纯内存根据目标 model 动态改写模板
     end
 
     Capture->>Session: generate_snapshot(contents)
@@ -212,6 +220,13 @@ sequenceDiagram
 1. 率先获得 `_switch_lock` 的协程执行实质性切号与页面上下文刷新；
 2. 后续排队获得锁的协程通过双重检查（Double-Checked Locking），识别到账号已被切换至健康账号且对当前模型可用，直接复用重试，避免并发异常导致多次无谓切号；
 3. 若为单账号或备用账号全部耗尽时，系统自动对当前账号触发在位强制刷新（In-Place Refresh），清除模板缓存并重新激活会话握手 BotGuard 实现自愈。
+### 4.4 蓝绿会话平滑热切与就绪门机制 (Blue-Green Session Transition)
+
+针对多账号并发场景，系统实现了无锁化原子就绪门（`SessionReadinessGate`）与蓝绿标签页热切：
+1. **独立新标签页隔离初始化**：当触发账号轮换时，网关在后台并发创建新 CDP 标签页，注入新账号 Cookie，导航至目标子路由 `/u/{auth_user}/` 并完成 WAA 挑战握手；
+2. **原子门禁切换**：握手就绪后，`SessionReadinessGate` 原子切换至新 `SessionContext`，状态置为 `READY`，瞬间放行排队中的新请求；
+3. **旧会话平滑排干 (Drain)**：旧账号上下文移入退休队列，在途流式请求继续在原有标签页中执行；当在途计数归零（`in_flight == 0`）触发 `drain_event` 后，再安全销毁旧标签页 CDP 资源，实现零流式阻断、零请求丢失的热切换。
+
 
 ## 5. 跨平台支持与依赖隔离
 
@@ -221,5 +236,5 @@ sequenceDiagram
 | **Linux (x86_64 / arm64)** | 原生宿主运行 | CloakBrowser (x86_64 / arm64) | 约 250 - 350 MB PSS |
 | **macOS (Apple Silicon / Intel)** | 原生宿主运行 | CloakBrowser | 约 250 - 350 MB |
 | **Windows (x64)** | 原生宿主运行 (Job Object 进程管理) | CloakBrowser (x64) | 约 280 - 380 MB |
-| **Docker 容器** | Debian 基础镜像 | 容器内 CloakBrowser | 约 250 - 350 MB |
+| **Docker 容器** | Debian 基础镜像 (amd64 / arm64) | 容器内置 CloakBrowser (`/opt/cloakbrowser/chrome`) | 约 250 - 350 MB |
 > 依赖管理使用 `uv`。由于 PyPI 官方未提供 Android 预编译 wheel，而 Termux 的 TUR 源缺少桌面端 wheel，因此 `uv.lock` 不纳入版本控制：桌面端直接从 PyPI 安装对应 wheel；Termux 环境通过本地 `uv.toml` 使用 TUR 源，避免不同平台的 wheel 源锁定冲突。
