@@ -124,6 +124,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Studio API", lifespan=lifespan)
 app.include_router(system_public_router)
 app.include_router(system_protected_router, dependencies=[Depends(require_web_auth)])
+app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)])
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
@@ -297,6 +298,7 @@ async def spa_navigation_middleware(request: Request, call_next):
     )
     is_api = request.url.path.startswith(
         (
+            "/api",
             "/v1beta",
             "/auth",
             "/assets",
@@ -310,16 +312,33 @@ async def spa_navigation_middleware(request: Request, call_next):
     )
     is_accounts_spa = request.url.path in ("/accounts", "/accounts/")
     if is_html_nav and (is_accounts_spa or not is_api) and index_html_path.is_file():
-        return FileResponse(index_html_path)
+        response = FileResponse(index_html_path)
+        response.headers["Vary"] = "Accept"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
 
-    return await call_next(request)
+    response = await call_next(request)
+
+    if request.url.path.startswith(("/accounts", "/api/accounts")) or is_html_nav:
+        existing_vary = response.headers.get("Vary")
+        if existing_vary:
+            if "Accept" not in [v.strip() for v in existing_vary.split(",")]:
+                response.headers["Vary"] = f"{existing_vary}, Accept"
+        else:
+            response.headers["Vary"] = "Accept"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+
+    return response
 
 
 @app.get("/")
 async def root_index():
     """根路径兜底响应。"""
     if index_html_path.is_file():
-        return FileResponse(index_html_path)
+        response = FileResponse(index_html_path)
+        response.headers["Vary"] = "Accept"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
     return JSONResponse({"message": "AI Studio API Web UI"})
 
 

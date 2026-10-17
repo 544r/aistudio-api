@@ -47,7 +47,9 @@ export const useAccountsStore = defineStore('accounts', () => {
       if (accsRes.status === 'fulfilled') {
         accounts.value = accsRes.value
       } else {
+        const reasonMsg = accsRes.reason instanceof Error ? accsRes.reason.message : String(accsRes.reason)
         console.warn('获取账号列表失败，保留当前展示数据:', accsRes.reason)
+        useToastStore().error(`获取账号列表失败: ${reasonMsg}`)
       }
 
       if (activeRes.status === 'fulfilled') {

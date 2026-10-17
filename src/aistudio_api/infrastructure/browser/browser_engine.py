@@ -97,13 +97,27 @@ def find_chromium_executable() -> str:
                     os.access(match, os.X_OK) or platform.system() == "Windows"
                 ):
                     return _resolve_local_chrome(str(match))
-    # 4. In Termux with proot-distro container: check wrapper path
+    # 4. System-level CloakBrowser (/opt/cloakbrowser/**/chrome)
+    opt_cloak_dir = Path("/opt/cloakbrowser")
+    if opt_cloak_dir.is_dir():
+        for pat in (
+            "chrome",
+            "**/chrome",
+        ):
+            opt_matches = sorted(opt_cloak_dir.glob(pat))
+            for match in reversed(opt_matches):
+                if match.is_file() and (
+                    os.access(match, os.X_OK) or platform.system() == "Windows"
+                ):
+                    return _resolve_local_chrome(str(match))
+
+    # 5. In Termux with proot-distro container: check wrapper path
     if _is_termux():
         wrapper = _find_wrapper_path()
         if wrapper:
             return wrapper
 
-    # 5. Strictly CloakBrowser only. All fallbacks to Edge/Chrome/Brave/Chromium are removed!
+    # 6. Strictly CloakBrowser only. All fallbacks to Edge/Chrome/Brave/Chromium are removed!
     raise FileNotFoundError(
         "未检测到 CloakBrowser 浏览器。\n"
         "本项目仅支持 CloakBrowser，不支持 Edge 或标准 Chrome。\n"

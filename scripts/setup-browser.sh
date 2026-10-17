@@ -170,11 +170,19 @@ setup_linux() {
         TMP="$(mktemp -d)"
         trap 'rm -rf "${TMP}"' EXIT
         curl -fSL --retry 3 -o "${TMP}/${archive}" "${download_url}"
-        tar -xzf "${TMP}/${archive}" -C "${CLOAK_ROOT}"
-        INNER="$(find "${CLOAK_ROOT}" -mindepth 2 -maxdepth 2 -type d -name 'chromium-*' | head -1 || true)"
-        if [[ -n "${INNER}" && "${INNER}" != "${CHROME_DIR_HOST}" ]]; then
-            mv "${INNER}" "${CHROME_DIR_HOST}"
+        mkdir -p "${CHROME_DIR_HOST}"
+        tar -xzf "${TMP}/${archive}" -C "${CHROME_DIR_HOST}"
+        if [[ ! -f "${CHROME_DIR_HOST}/chrome" ]]; then
+            INNER="$(find "${CHROME_DIR_HOST}" -mindepth 1 -maxdepth 2 -type f -name chrome | head -1 || true)"
+            if [[ -n "${INNER}" ]]; then
+                INNER_DIR="$(dirname "${INNER}")"
+                if [[ "${INNER_DIR}" != "${CHROME_DIR_HOST}" ]]; then
+                    mv "${INNER_DIR}"/* "${CHROME_DIR_HOST}/"
+                    rmdir "${INNER_DIR}" 2>/dev/null || true
+                fi
+            fi
         fi
+        chmod +x "${CHROME_DIR_HOST}/chrome" 2>/dev/null || true
         log "CloakBrowser ready at ${CHROME_DIR_HOST}/chrome"
     fi
 }

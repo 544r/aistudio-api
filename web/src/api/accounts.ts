@@ -11,58 +11,57 @@ import type {
 
 export const accountsApi = {
   list(): Promise<Account[]> {
-    return request<Account[]>('/accounts')
+    return request<Account[]>('/api/accounts')
   },
 
   getActive(): Promise<Account> {
-    return request<Account>('/accounts/active')
+    return request<Account>('/api/accounts/active')
   },
 
   activate(id: string): Promise<Account> {
-    return request<Account>(`/accounts/${id}/activate`, {
+    return request<Account>(`/api/accounts/${id}/activate`, {
       method: 'POST',
     })
   },
   detectEmail(id: string): Promise<Account> {
-    return request<Account>(`/accounts/${id}/detect-email`, {
+    return request<Account>(`/api/accounts/${id}/detect-email`, {
       method: 'POST',
     })
   },
 
-
   delete(id: string): Promise<{ ok: boolean }> {
-    return request<{ ok: boolean }>(`/accounts/${id}`, {
+    return request<{ ok: boolean }>(`/api/accounts/${id}`, {
       method: 'DELETE',
     })
   },
 
   update(id: string, name: string): Promise<Account> {
-    return request<Account>(`/accounts/${id}`, {
+    return request<Account>(`/api/accounts/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ name }),
     })
   },
 
   importCookies(req: ImportCookiesRequest): Promise<ImportCookiesResponse> {
-    return request<ImportCookiesResponse>('/accounts/import-cookies', {
+    return request<ImportCookiesResponse>('/api/accounts/import-cookies', {
       method: 'POST',
       body: JSON.stringify(req),
     })
   },
 
   probeAndImport(req: ProbeAndImportRequest): Promise<ProbeAndImportResponse> {
-    return request<ProbeAndImportResponse>('/accounts/probe-import', {
+    return request<ProbeAndImportResponse>('/api/accounts/probe-import', {
       method: 'POST',
       body: JSON.stringify(req),
     })
   },
   deleteCookieGroup(cookieId: string): Promise<{ deleted: number }> {
-    return request<{ deleted: number }>(`/accounts/group/${encodeURIComponent(cookieId)}`, {
+    return request<{ deleted: number }>(`/api/accounts/group/${encodeURIComponent(cookieId)}`, {
       method: 'DELETE',
     })
   },
   importBundle(req: ImportBundleRequest): Promise<ImportBundleResponse> {
-    return request<ImportBundleResponse>('/accounts/import-bundle', {
+    return request<ImportBundleResponse>('/api/accounts/import-bundle', {
       method: 'POST',
       body: JSON.stringify(req),
     })

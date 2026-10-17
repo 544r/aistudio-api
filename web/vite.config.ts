@@ -14,6 +14,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      '/api': 'http://localhost:8080',
       '/auth': 'http://localhost:8080',
       '/stats': 'http://localhost:8080',
       '/accounts': 'http://localhost:8080',

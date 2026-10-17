@@ -104,6 +104,39 @@ def test_find_chromium_executable_strictly_requires_cloakbrowser(tmp_path):
         found = find_chromium_executable()
         assert found == str(fake_chrome)
 
+    # 4. When CloakBrowser is installed in /opt/cloakbrowser (e.g. Docker container)
+    fake_opt_chrome = tmp_path / "opt_cloak" / "chrome"
+    fake_opt_chrome.parent.mkdir(parents=True)
+    fake_opt_chrome.write_text("fake docker cloakbrowser")
+    if platform.system() != "Windows":
+        fake_opt_chrome.chmod(0o755)
+
+    orig_glob = Path.glob
+
+    def fake_opt_is_dir(self):
+        if self.name == ".cloakbrowser":
+            return False
+        if str(self) == "/opt/cloakbrowser":
+            return True
+        return orig_is_dir(self)
+
+    def fake_opt_glob(self, pat):
+        if str(self) == "/opt/cloakbrowser":
+            return [fake_opt_chrome]
+        return orig_glob(self, pat)
+
+    with (
+        patch.object(Path, "is_dir", fake_opt_is_dir),
+        patch.object(Path, "glob", fake_opt_glob),
+        patch("aistudio_api.config.settings.browser_executable_path", None),
+        patch(
+            "aistudio_api.infrastructure.browser.browser_engine._is_termux",
+            return_value=False,
+        ),
+    ):
+        found = find_chromium_executable()
+        assert found == str(fake_opt_chrome)
+
 
 def test_build_chromium_args_low_memory_optimizations():
     """Verify low-memory optimization flags and absence of memory-pressure-off."""

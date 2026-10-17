@@ -46,6 +46,8 @@ async def test_spa_endpoints():
         for resp in responses:
             assert resp.status_code == 200
             assert "<!DOCTYPE html>" in resp.text
+            assert "Accept" in resp.headers.get("Vary", "")
+            assert "no-store" in resp.headers.get("Cache-Control", "")
 
 
 @pytest.mark.asyncio
