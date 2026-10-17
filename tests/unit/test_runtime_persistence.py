@@ -88,3 +88,34 @@ def test_account_rotator_state_persistence(tmp_path, monkeypatch):
     assert all_stats["acc_test1"]["rate_limited"] == 3
     assert not rotator2._stats["acc_test1"].is_available("gemini-3.7-flash")
     assert not rotator2._stats["acc_test2"].is_available("gemini-3.7-flash")
+
+
+def test_resolve_config_file_initializes_from_template_when_missing(
+    tmp_path, monkeypatch
+):
+    from aistudio_api.config import resolve_config_file
+
+    target_config = tmp_path / "data" / "config.yaml"
+    assert not target_config.exists()
+
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(target_config))
+    resolved = resolve_config_file()
+
+    assert resolved == target_config
+    assert target_config.is_file()
+    content = target_config.read_text(encoding="utf-8")
+    assert "model_defaults" in content or "api_keys" in content
+
+
+def test_resolve_config_file_never_overwrites_existing(tmp_path, monkeypatch):
+    from aistudio_api.config import resolve_config_file
+
+    target_config = tmp_path / "data" / "config.yaml"
+    target_config.parent.mkdir(parents=True, exist_ok=True)
+    target_config.write_text("custom_key: preserved_value\n", encoding="utf-8")
+
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(target_config))
+    resolved = resolve_config_file()
+
+    assert resolved == target_config
+    assert target_config.read_text(encoding="utf-8") == "custom_key: preserved_value\n"

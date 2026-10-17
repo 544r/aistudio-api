@@ -48,6 +48,11 @@ reportUnknownLambdaType = false
 reportPrivateUsage = false
 reportUnusedVariable = "warning"
 reportUnusedImport = "warning"
+reportUnusedFunction = "warning"
+reportUnusedClass = "warning"
+reportDuplicateImport = "warning"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnnecessaryCast = "warning"
 
 [project.scripts]
 aistudio-api = "aistudio_api.main:main"
@@ -114,6 +119,11 @@ select = [
     "T10",    # flake8-debugger
     "A",      # flake8-builtins
     "YTT",    # flake8-2020
+    "ARG",    # flake8-unused-arguments
+    "PGH",    # pygrep-hooks
+    "G",      # flake8-logging-format
+    "ISC",    # flake8-implicit-str-concat
+    "ICN",    # flake8-import-conventions
 ]
 ignore = [
     "E501",      # Line too long (handled by formatter)
@@ -133,7 +143,7 @@ combine-as-imports = true
 [tool.ruff.lint.per-file-ignores]
 "main.py" = ["E402"]
 "src/aistudio_api/infrastructure/account/account_store.py" = ["PTH"]
-"tests/**" = ["B018", "PTH", "ASYNC", "A001", "A002", "RET504", "TC001", "TC002", "TC003"]
+"tests/**" = ["B018", "PTH", "ASYNC", "A001", "A002", "RET504", "TC001", "TC002", "TC003", "ARG"]
 
 [tool.ruff.format]
 quote-style = "double"

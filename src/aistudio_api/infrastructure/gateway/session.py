@@ -1122,9 +1122,9 @@ class BrowserSession:
             auth_path.write_text(
                 json.dumps({"cookies": current_cookies, "origins": origins}, indent=2)
             )
-            log.info(f"Saved {len(current_cookies)} cookies to {target_auth_file}")
+            log.info("Saved %d cookies to %s", len(current_cookies), target_auth_file)
         except Exception as e:
-            log.debug(f"Failed to save cookies: {e}")
+            log.debug("Failed to save cookies: %s", e)
 
     @staticmethod
     def _derive_profile_dir(auth_file: str | None) -> str | None:

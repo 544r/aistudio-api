@@ -840,7 +840,7 @@ def install_process_cleanup_handlers() -> None:
             try:
                 prev_handler = signal.getsignal(sig)
 
-                def _make_win_handler(s: signal.Signals, prev: object):
+                def _make_win_handler(prev: object):
                     def _handler(signum: int, frame: object) -> None:
                         _cleanup_all_chromium()
                         if callable(prev) and prev not in (
@@ -855,7 +855,7 @@ def install_process_cleanup_handlers() -> None:
 
                     return _handler
 
-                signal.signal(sig, _make_win_handler(sig, prev_handler))
+                signal.signal(sig, _make_win_handler(prev_handler))
             except (ValueError, AttributeError, TypeError):
                 pass
     else:
@@ -863,7 +863,7 @@ def install_process_cleanup_handlers() -> None:
             try:
                 prev_handler = signal.getsignal(sig)
 
-                def _make_handler(s: signal.Signals, prev: object):
+                def _make_handler(prev: object):
                     def _handler(signum: int, frame: object) -> None:
                         _cleanup_all_chromium()
                         if callable(prev) and prev not in (
@@ -878,7 +878,7 @@ def install_process_cleanup_handlers() -> None:
 
                     return _handler
 
-                signal.signal(sig, _make_handler(sig, prev_handler))
+                signal.signal(sig, _make_handler(prev_handler))
             except (ValueError, AttributeError, TypeError):
                 pass
 

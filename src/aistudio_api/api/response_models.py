@@ -7,25 +7,6 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-class GoogleApiErrorDetail(BaseModel):
-    code: int = 500
-    message: str
-    status: str = "INTERNAL"
-
-
-class ErrorDetail(BaseModel):
-    message: str
-    type: str = "server_error"
-
-
-class ErrorResponse(BaseModel):
-    error: ErrorDetail
-
-
-class GoogleApiErrorResponse(BaseModel):
-    error: GoogleApiErrorDetail
-
-
 class GeminiUsageMetadata(BaseModel):
     promptTokenCount: int = 0
     candidatesTokenCount: int = 0

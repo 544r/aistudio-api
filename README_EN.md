@@ -163,7 +163,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v aistudio-api-data:/app/data \
-  ghcr.io/chrysoljq/aistudio-api:latest
+  ghcr.io/deconstructedcube/aistudio-api:latest
 ```
 
 Or with Docker Compose:

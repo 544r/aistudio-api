@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,20 +43,6 @@ def _load_int_env(*names: str, default: int) -> int:
         return default
     return int(value)
 
-
-def _parse_api_keys(raw: str | None) -> tuple[str, ...]:
-    if raw is None:
-        return ()
-
-    keys: list[str] = []
-    for line in raw.splitlines():
-        for part in line.split(","):
-            key = part.strip()
-            if key and key not in keys:
-                keys.append(key)
-    return tuple(keys)
-
-
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
@@ -78,24 +65,41 @@ def _load_dump_to_file_env() -> bool:
         return False
     return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
 
-
-def _is_debug_env_set() -> bool:
-    return _load_env("DEBUG", "AISTUDIO_DEBUG", "AISTUDIO_DUMP_REQUESTS") is not None
-
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.yaml"
+_TEMPLATE_CONFIG_PATHS = (
+    _PROJECT_ROOT / "defaults" / "config.yaml",
+    _DEFAULT_CONFIG_PATH,
+)
 
 
 def resolve_config_file(config_path: str | os.PathLike[str] | None = None) -> Path:
-    """解析配置文件路径（优先使用 AISTUDIO_CONFIG_FILE 环境变量）。"""
+    """解析配置文件路径（优先使用 AISTUDIO_CONFIG_FILE 环境变量）。
+
+    若目标路径配置文件不存在，则自动从内置配置模板初始化复制，绝不覆盖已有配置文件。
+    """
     if config_path is not None:
-        return Path(config_path)
-    override = os.getenv("AISTUDIO_CONFIG_FILE")
-    if override:
-        return Path(override)
-    return _DEFAULT_CONFIG_PATH
+        target = Path(config_path)
+    else:
+        override = os.getenv("AISTUDIO_CONFIG_FILE")
+        target = Path(override) if override else _DEFAULT_CONFIG_PATH
+
+    if not target.exists():
+        for template in _TEMPLATE_CONFIG_PATHS:
+            if template.is_file():
+                try:
+                    if template.resolve() == target.resolve():
+                        break
+                except OSError:
+                    pass
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(template, target)
+                    break
+                except OSError:
+                    pass
+    return target
 
 
 def resolve_data_dir() -> Path:

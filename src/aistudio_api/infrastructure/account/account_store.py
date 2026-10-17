@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
 import shutil
 import threading
 import time
@@ -41,9 +40,6 @@ _SEARCH_ROOTS: list[Path] = [
     .resolve()
     .parents[4],  # src/aistudio_api/infrastructure/account -> 项目根
 ]
-
-_SAFE_ACCOUNT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-\.@]+$")
-
 
 def _safe_account_dir(accounts_dir: Path, account_id: str) -> Path:
     """验证并返回安全的账号子目录路径，防止路径遍历攻击。"""

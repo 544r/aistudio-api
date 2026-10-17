@@ -5,8 +5,6 @@ from __future__ import annotations
 import base64
 
 from aistudio_api.api.response_models import (
-    ErrorDetail,
-    ErrorResponse,
     GeminiFunctionCallPayload,
     GeminiFunctionResponsePayload,
     GeminiInlineDataResponse,
@@ -55,18 +53,6 @@ def to_gemini_usage_metadata(
         thoughtsTokenCount=reasoning_tokens,
         totalTokenCount=total_tokens,
     )
-
-
-def sse_error(message: str, code: int = 500, status: str = "INTERNAL") -> str:
-    data = ErrorResponse(error=ErrorDetail(message=message, type="server_error"))
-    return f"data: {data.model_dump_json()}\n\n"
-
-
-def sse_google_error(message: str, code: int = 500, status: str = "INTERNAL") -> str:
-    data = {"error": {"code": code, "message": message, "status": status}}
-    import json
-
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def to_gemini_parts(

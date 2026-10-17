@@ -162,13 +162,11 @@ def test_domain_overrides_scopes_osid_strictly_to_aistudio():
 @pytest.mark.asyncio
 async def test_import_bundle_flow(tmp_path):
     from aistudio_api.api.routes_accounts import ImportBundleRequest, import_bundle
-    from aistudio_api.api.state import RuntimeState
     from aistudio_api.application.account_service import AccountService
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
     store = AccountStore(accounts_dir=tmp_path / "accounts")
     svc = AccountService(store)
-    state = RuntimeState()
 
     bundle_content = """{
       "version": 1,
@@ -189,7 +187,7 @@ async def test_import_bundle_flow(tmp_path):
     }"""
 
     req = ImportBundleRequest(content=bundle_content)
-    res = await import_bundle(req, account_service=svc, runtime_state=state)
+    res = await import_bundle(req, account_service=svc)
 
     assert res.imported_count == 2
     assert len(res.accounts) == 2

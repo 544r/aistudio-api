@@ -329,7 +329,6 @@ async def import_cookies(
 async def probe_and_import(
     req: ProbeAndImportRequest,
     account_service: AccountService = Depends(get_account_service),
-    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ProbeAndImportResponse:
     """单份 Cookie 无限向下探活多账号并一键批量导入。"""
     from aistudio_api.infrastructure.account.cookie_parser import (
@@ -365,7 +364,6 @@ async def probe_and_import(
 async def import_bundle(
     req: ImportBundleRequest,
     account_service: AccountService = Depends(get_account_service),
-    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ImportBundleResponse:
     """批量导入多个账号的凭据 Bundle（支持传入 JSON 文本、直接解析列表或服务器本地文件路径）。"""
     import json
