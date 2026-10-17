@@ -88,24 +88,30 @@ async def test_model_discovery_falls_back_to_auth_file_cookies(tmp_path, monkeyp
 
     auth_file = tmp_path / "auth.json"
     auth_file.write_text(
-        json.dumps({
-            "cookies": [
-                {"name": "SAPISID", "value": "test_sapisid"},
-                {"name": "SID", "value": "test_sid"},
-            ]
-        }),
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "SAPISID", "value": "test_sapisid"},
+                    {"name": "SID", "value": "test_sid"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
     service = ModelDiscoveryService()
     mock_session = MagicMock()
-    mock_session._page = None  # 页面尚未初始化
+    mock_session.page = None  # 页面尚未初始化
     mock_session._auth_file = str(auth_file)
     mock_session.get_current_auth_user = MagicMock(return_value="0")
 
     # Mock HTTP 探测返回
     fake_http_models = [
-        {"id": "dynamic-gemini-test", "displayName": "Dynamic Gemini Test", "supportedGenerationMethods": ["generateContent"]}
+        {
+            "id": "dynamic-gemini-test",
+            "displayName": "Dynamic Gemini Test",
+            "supportedGenerationMethods": ["generateContent"],
+        }
     ]
     service._fetch_via_http = AsyncMock(return_value=fake_http_models)
 

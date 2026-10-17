@@ -148,11 +148,19 @@ class CDPConnection:
                     "Inspector.detached",
                     "Target.targetCrashed",
                 ):
-                    log.warning(
-                        "CDP 目标崩溃或断开: %s (参数=%s)",
-                        method,
-                        msg.get("params"),
+                    raw_params = msg.get("params")
+                    params: dict[str, object] = (
+                        raw_params if isinstance(raw_params, dict) else {}
                     )
+                    reason = str(params.get("reason") or "")
+                    if reason == "target_closed":
+                        log.debug("CDP 目标正常关闭: %s", reason)
+                    else:
+                        log.warning(
+                            "CDP 目标崩溃或断开: %s (参数=%s)",
+                            method,
+                            msg.get("params"),
+                        )
                     self.fail_pending_futures(
                         RuntimeError(f"CDP target terminated: {method}")
                     )
@@ -355,7 +363,10 @@ class CDPPage:
 
         def on_detached(params: dict[str, object]) -> None:
             reason = str(params.get("reason") or "detached")
-            log.warning("CDP 页面检查器已分离: %s", reason)
+            if reason == "target_closed":
+                log.debug("CDP 页面检查器已分离 (目标关闭)")
+            else:
+                log.warning("CDP 页面检查器已分离: %s", reason)
             self._is_closed = True
             self.cdp.fail_pending_futures(
                 RuntimeError(f"Page inspector detached: {reason}")
@@ -554,6 +565,7 @@ class CDPPage:
             return true;
         }}"""
         return bool(await self.evaluate(expr, timeout_s=timeout_s))
+
     async def fill(self, selector: str, value: str) -> bool:
         """Fill an input or textarea element with value."""
         expr = f"""(args) => {{
@@ -883,6 +895,33 @@ class CDPClient:
         raise RuntimeError(
             f"Failed to connect page target after 3 attempts: {last_exc}"
         ) from last_exc
+
+    async def create_new_page(self, block_assets: bool = True) -> CDPPage:
+        """Create a dedicated new tab target and connect CDP Page to it."""
+        await self.wait_until_ready()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.put(f"{self.base_url}/json/new")
+            resp.raise_for_status()
+            page_target = resp.json()
+
+        ws_url = str(page_target.get("webSocketDebuggerUrl") or "")
+        target_id = str(page_target.get("id") or "")
+        conn = CDPConnection(ws_url)
+        try:
+            await conn.connect()
+            page = CDPPage(conn, target_id)
+            await page.init_domains(block_assets=block_assets)
+            return page
+        except Exception:
+            await conn.close()
+            await self.close_target(target_id)
+            raise
+
+    async def close_target(self, target_id: str) -> None:
+        """Close a specific target ID via /json/close/{target_id}."""
+        with contextlib.suppress(Exception):
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.put(f"{self.base_url}/json/close/{target_id}")
 
     async def close(self) -> None:
         """Close active page and release resources."""

@@ -22,7 +22,11 @@ from aistudio_api.infrastructure.gateway.capture import (
     CapturedRequest,
     RequestCaptureService,
 )
-from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.session import (
+    DEFAULT_BOOTSTRAP_TEMPLATE,
+    BrowserSession,
+)
+from aistudio_api.infrastructure.gateway.session_state import SessionContext
 
 
 @pytest.mark.asyncio
@@ -309,6 +313,7 @@ def test_get_seconds_until_pacific_midnight():
 async def test_goto_aistudio_net_err_aborted_tolerance():
     """当 page.goto 遭遇 net::ERR_ABORTED 但已在 aistudio 时，视为有效抵达并容错。"""
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
+    from aistudio_api.infrastructure.gateway.session_auth import navigate_to_aistudio
 
     page = MagicMock(spec=CDPPage)
     page.url = "https://aistudio.google.com/prompts/new_chat"
@@ -324,13 +329,16 @@ async def test_goto_aistudio_net_err_aborted_tolerance():
     )
     page.wait_for_timeout = AsyncMock()
 
-    session = BrowserSession(port=9222)
-    session.get_current_auth_user = MagicMock(return_value="0")
-    session._verify_account_identity = AsyncMock()
-    session._save_cookies = AsyncMock()
-    # 应该正常完成，不抛出 net::ERR_ABORTED 异常
-    await session._goto_aistudio(page)
-    assert session._verify_account_identity.called
+    mock_verify = AsyncMock()
+    mock_save = AsyncMock()
+    await navigate_to_aistudio(
+        page,
+        auth_user="0",
+        auth_file=None,
+        verify_identity_cb=mock_verify,
+        save_cookies_cb=mock_save,
+    )
+    assert mock_verify.called
 
 
 @pytest.mark.asyncio
@@ -344,10 +352,15 @@ async def test_ensure_botguard_available_regions_fast_fail():
     page.evaluate = AsyncMock(return_value=False)
 
     session = BrowserSession(port=9222)
-    session._page = page
-    session.ensure_context = AsyncMock(return_value=page)
-    session._install_hooks = AsyncMock()
-
+    session.set_ready_context(
+        SessionContext(
+            page=page,
+            snap_key="snap_key",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     with pytest.raises(RuntimeError, match="地区限制"):
         await session.ensure_botguard_service()
 
@@ -442,7 +455,15 @@ async def test_browser_session_send_streaming_batch_events():
 
     page.evaluate = AsyncMock(side_effect=fake_eval)
     session = BrowserSession(port=9222)
-    session._page = page
+    session.set_ready_context(
+        SessionContext(
+            page=page,
+            snap_key="snap_key",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     results = []
     async for tag, data in session.send_streaming_request(
         url="https://example.com",

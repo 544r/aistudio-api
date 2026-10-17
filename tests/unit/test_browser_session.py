@@ -13,7 +13,11 @@ from aistudio_api.application.account_service import AccountService
 from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.gateway.capture import RequestCaptureService
-from aistudio_api.infrastructure.gateway.session import BrowserSession
+from aistudio_api.infrastructure.gateway.session import (
+    DEFAULT_BOOTSTRAP_TEMPLATE,
+    BrowserSession,
+)
+from aistudio_api.infrastructure.gateway.session_state import SessionContext
 from aistudio_api.infrastructure.gateway.wire_types import AistudioContent, AistudioPart
 
 
@@ -40,8 +44,15 @@ def mock_cdp_page():
 @pytest.mark.asyncio
 async def test_browser_session_generate_snapshot(mock_cdp_page):
     session = BrowserSession(port=9222)
-    session._page = mock_cdp_page
-    session._snap_key = "test_snapshot_fn"
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
 
     async def fake_evaluate(expr, *args, **kwargs):
         if "isSnapCandidate" in expr or "SavePrompt" in expr or "__api_hooked" in expr:
@@ -71,7 +82,15 @@ async def test_browser_session_generate_snapshot(mock_cdp_page):
 @pytest.mark.asyncio
 async def test_browser_session_send_hooked_request(mock_cdp_page):
     session = BrowserSession(port=9222)
-    session._page = mock_cdp_page
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
 
     async def fake_evaluate(expr, args=None, *a, **kw):
         if "isSnapCandidate" in expr or "SavePrompt" in expr or "__api_hooked" in expr:
@@ -97,8 +116,15 @@ async def test_browser_session_send_hooked_request(mock_cdp_page):
 @pytest.mark.asyncio
 async def test_browser_session_send_streaming_request(mock_cdp_page):
     session = BrowserSession(port=9222)
-    session._page = mock_cdp_page
-
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     binding_callback = None
 
     def mock_on_binding(name, cb):
@@ -157,9 +183,17 @@ async def test_browser_session_liveness_and_auto_reconnect():
     mock_alive_page.is_closed = MagicMock(return_value=False)
     mock_alive_page.is_alive = AsyncMock(return_value=True)
 
-    session._page = mock_dead_page
-    session._ensure_browser_cdp = AsyncMock(return_value=mock_alive_page)
+    session.set_ready_context(
+        SessionContext(
+            page=mock_dead_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     session._close_internal = AsyncMock()
+    session._ensure_browser_cdp = AsyncMock(return_value=mock_alive_page)
 
     # ensure_context should detect dead page, close it, and reconnect to new page
     page = await session.ensure_context()
@@ -193,9 +227,15 @@ async def test_generate_snapshot_hash_complex_tools_and_multimodal():
         return None
 
     mock_page.evaluate.side_effect = fake_evaluate
-    session._page = mock_page
-    session._snap_key = "snap_fn"
-
+    session.set_ready_context(
+        SessionContext(
+            page=mock_page,
+            snap_key="snap_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     # Complex multi-turn contents with text, inline data, file_id, function_call, and function_response
     contents = [
         AistudioContent(
@@ -329,10 +369,15 @@ def test_is_login_page_url():
 async def test_browser_session_generate_snapshot_concurrency(mock_cdp_page):
     """Verify concurrent generate_snapshot calls are safely serialized by _snapshot_lock."""
     session = BrowserSession(port=9222)
-    session._page = mock_cdp_page
-    session._snap_key = "test_snapshot_fn"
-    session._hooks_installed = True
-
+    session.set_ready_context(
+        SessionContext(
+            page=mock_cdp_page,
+            snap_key="test_snapshot_fn",
+            auth_user="0",
+            auth_file=None,
+            base_template=dict(DEFAULT_BOOTSTRAP_TEMPLATE),
+        )
+    )
     concurrent_evals = 0
     max_concurrent_evals = 0
 
@@ -372,34 +417,37 @@ async def test_browser_session_generate_snapshot_concurrency(mock_cdp_page):
     assert max_concurrent_evals == 1
     assert len(set(results)) == 5
 
+
 def test_browser_session_temporary_chat_urls():
     """Verify AI Studio navigation URLs always enforce temporary=true to prevent history pollution."""
-    from aistudio_api.infrastructure.gateway.session import (
+    from aistudio_api.infrastructure.gateway.session_auth import (
         AI_STUDIO_URL,
         AI_STUDIO_URL_FALLBACK,
+        get_aistudio_urls,
     )
 
     assert "temporary=true" in AI_STUDIO_URL
     assert "temporary=true" in AI_STUDIO_URL_FALLBACK
 
-    session = BrowserSession(port=9222)
-    urls_default = session._get_aistudio_url(model="gemini-3.7-flash")
+    urls_default = get_aistudio_urls(auth_user="0", model="gemini-3.7-flash")
     assert all("temporary=true" in u for u in urls_default)
 
-    session.get_current_auth_user = MagicMock(return_value="3")
-    urls_multi = session._get_aistudio_url(model="gemini-3.8-flash")
+    urls_multi = get_aistudio_urls(auth_user="3", model="gemini-3.8-flash")
     assert all("temporary=true" in u for u in urls_multi)
     assert any("/u/3/" in u for u in urls_multi)
 
+
 @pytest.mark.asyncio
 async def test_browser_session_enable_temporary_chat(mock_cdp_page):
-    """Verify _enable_temporary_chat evaluates the in-page selector script."""
-    session = BrowserSession(port=9222)
+    """Verify enable_temporary_chat evaluates the in-page selector script."""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        enable_temporary_chat,
+    )
+
     mock_cdp_page.evaluate.return_value = True
 
-    res = await session._enable_temporary_chat(mock_cdp_page)
+    res = await enable_temporary_chat(mock_cdp_page)
     assert res is True
     mock_cdp_page.evaluate.assert_called_once()
     expr = mock_cdp_page.evaluate.call_args[0][0]
     assert "temporary" in expr.lower()
-

@@ -29,6 +29,7 @@ class RequestCaptureService:
     def __init__(self, session: BrowserSession):
         self._session = session
         self._templates: dict[str, CapturedRequest] = {}
+        self._active_ctx_id: int | None = None
         self._lock = asyncio.Lock()
 
     def clear_templates(self) -> None:
@@ -101,6 +102,12 @@ class RequestCaptureService:
         return captured
 
     async def _ensure_template(self, model: str) -> CapturedRequest:
+        ctx = self._session.active_context
+        ctx_id = ctx.context_id if ctx else None
+        if self._active_ctx_id != ctx_id:
+            self._templates.clear()
+            self._active_ctx_id = ctx_id
+
         if model in self._templates:
             return self._templates[model]
 
