@@ -270,6 +270,49 @@ def test_parse_benefit_tier_and_update_account_tier(tmp_path):
     assert store.update_account_tier(acc.id, "Pro") is False
 
 
+
+def test_parse_emails_from_ogs_html_and_meta_reconciliation(tmp_path):
+    """测试 Google OGS/AI Studio HTML 邮箱提取以及 meta.json 与 registry.json 自动对齐。"""
+    import json
+
+    from aistudio_api.infrastructure.account.account_store import AccountStore
+    from aistudio_api.infrastructure.account.cookie_parser import (
+        parse_emails_from_ogs_html,
+    )
+
+    sample_html = (
+        '{"oPEP7c":"user0@gmail.com"} '
+        '<a data-au="1" data-email="user1@gmail.com"></a> '
+        '<a data-email="user2@gmail.com" data-au="2"></a>'
+    )
+    emails = parse_emails_from_ogs_html(sample_html, "0")
+    assert emails == {
+        "0": "user0@gmail.com",
+        "1": "user1@gmail.com",
+        "2": "user2@gmail.com",
+    }
+
+    # 验证当 meta.json 被外部/浏览器更新了 email 与 tier，而 registry.json 仍为旧值时，加载自动对齐
+    acc_dir = tmp_path / "accounts_reconcile"
+    store = AccountStore(accounts_dir=acc_dir)
+    acc = store.save_account(
+        name="Reconcile Test",
+        email=None,
+        storage_state={"cookies": []},
+    )
+    meta_path = acc_dir / acc.id / "meta.json"
+    meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta_data["email"] = "reconciled@gmail.com"
+    meta_data["tier"] = "Pro"
+    meta_path.write_text(json.dumps(meta_data), encoding="utf-8")
+
+    # 模拟重新加载注册表
+    store._registry = None
+    reloaded = store.get_account(acc.id)
+    assert reloaded is not None
+    assert reloaded.email == "reconciled@gmail.com"
+    assert reloaded.tier == "Pro"
+
 @pytest.mark.asyncio
 async def test_delete_cookie_group_migrates_active_account(tmp_path):
     """测试批量删除包含当前活跃账号的 Cookie 组时，正确切换活跃账号与浏览器会话。"""

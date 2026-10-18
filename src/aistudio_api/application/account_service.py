@@ -113,6 +113,7 @@ class AccountService:
         for p in probed_list:
             u_idx = str(p.get("auth_user") or "0")
             tier = str(p.get("tier") or "Free")
+            email_val = str(p["email"]) if p.get("email") else None
             acc_name = (
                 f"{prefix} (u/{u_idx})"
                 if len(probed_list) > 1 or u_idx != "0"
@@ -120,7 +121,7 @@ class AccountService:
             )
             account = self._store.save_account(
                 name=acc_name,
-                email=None,
+                email=email_val,
                 storage_state=storage_state,
                 auth_user=u_idx,
                 cookie_id=cookie_id,

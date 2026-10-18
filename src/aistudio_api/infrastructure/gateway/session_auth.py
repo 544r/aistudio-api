@@ -162,6 +162,23 @@ async def extract_account_tier(
     """Extract authenticated Google AI benefit tier via in-page GetAiStudioBenefitTier XHR."""
     if page is None or page.is_closed():
         return None
+    from aistudio_api.infrastructure.account.cookie_parser import (
+        calculate_sapisid_hash,
+    )
+
+    auth_header = ""
+    with suppress(Exception):
+        cookie_dict = getattr(page, "_cached_cookies", None)
+        if not cookie_dict:
+            cookie_list = await page.get_cookies()
+            cookie_dict = {
+                str(c.get("name") or ""): str(c.get("value") or "")
+                for c in cookie_list
+                if isinstance(c, dict) and c.get("name")
+            }
+        if cookie_dict:
+            auth_header = calculate_sapisid_hash(cookie_dict)
+
     script = """
     (args) => {
         return new Promise((resolve) => {
@@ -172,6 +189,9 @@ async def extract_account_tier(
             xhr.setRequestHeader('X-Goog-Api-Key', args.apiKey);
             xhr.setRequestHeader('X-Goog-AuthUser', String(args.authUser || '0'));
             xhr.setRequestHeader('X-Goog-Ext-519733851-bin', args.extBin);
+            if (args.authHeader) {
+                xhr.setRequestHeader('Authorization', args.authHeader);
+            }
             xhr.withCredentials = true;
             xhr.timeout = 8000;
             xhr.onload = () => {
@@ -195,6 +215,7 @@ async def extract_account_tier(
                 "apiKey": DEFAULT_API_KEY,
                 "userAgent": DEFAULT_USER_AGENT,
                 "extBin": DEFAULT_EXT_BIN,
+                "authHeader": auth_header,
             },
             timeout_s=10.0,
         )
@@ -240,15 +261,43 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
                 mask_email(discovered_email),
             )
             meta["email"] = discovered_email
+            expected_email = discovered_email.strip().lower()
             with suppress(Exception):
                 meta_path.write_text(
                     json.dumps(meta, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
-            expected_email = discovered_email.strip().lower()
+            with suppress(Exception):
+                from aistudio_api.infrastructure.account.account_store import (
+                    AccountStore,
+                )
 
-    if is_on_correct_user and not meta.get("tier"):
+                if account_id and account_id != "unknown":
+                    AccountStore().update_account_email(account_id, discovered_email)
+
+    if is_on_correct_user and (not meta.get("tier") or meta.get("tier") == "Free"):
         discovered_tier = await extract_account_tier(page, auth_user=auth_user)
+        if not discovered_tier or discovered_tier == "Free":
+            try:
+                auth_data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
+                cookie_dict = {
+                    str(c.get("name") or ""): str(c.get("value") or "")
+                    for c in auth_data.get("cookies", [])
+                    if isinstance(c, dict) and c.get("name")
+                }
+                if cookie_dict:
+                    from aistudio_api.infrastructure.account.cookie_parser import (
+                        probe_account_benefit_tier,
+                    )
+
+                    http_tier = await probe_account_benefit_tier(
+                        cookie_dict, auth_user=auth_user
+                    )
+                    if http_tier and http_tier != "Free":
+                        discovered_tier = http_tier
+            except Exception:
+                pass
+
         if discovered_tier:
             meta["tier"] = discovered_tier
             with suppress(Exception):
@@ -263,9 +312,9 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
 
                 if account_id and account_id != "unknown":
                     AccountStore().update_account_tier(account_id, discovered_tier)
+
     if not expected_email:
         return is_on_correct_user
-
     if (
         discovered_email
         and discovered_email.strip().lower() == expected_email

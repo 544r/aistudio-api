@@ -222,6 +222,28 @@ class AccountStore:
             try:
                 data = json.loads(self._registry_path.read_text(encoding="utf-8"))
                 self._registry = Registry.from_dict(data)
+                reconciled = False
+                for acc_id, acc in self._registry.accounts.items():
+                    account_dir = self._accounts_dir / acc_id
+                    meta_path = account_dir / "meta.json"
+                    if meta_path.is_file():
+                        try:
+                            mdata = json.loads(meta_path.read_text(encoding="utf-8"))
+                            if isinstance(mdata, dict):
+                                if not acc.email and mdata.get("email"):
+                                    acc.email = str(mdata["email"])
+                                    reconciled = True
+                                if (
+                                    (not acc.tier or acc.tier == "Free")
+                                    and mdata.get("tier")
+                                    and mdata.get("tier") != "Free"
+                                ):
+                                    acc.tier = str(mdata["tier"])
+                                    reconciled = True
+                        except Exception:
+                            pass
+                if reconciled:
+                    _atomic_write_json(self._registry_path, self._registry.to_dict())
             except Exception:
                 self._registry = Registry(accounts={})
             return self._registry
