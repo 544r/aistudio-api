@@ -9,6 +9,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aistudio_api.domain.errors import SessionExpiredError
+from aistudio_api.infrastructure.account.cookie_parser import (
+    DEFAULT_API_KEY,
+    DEFAULT_EXT_BIN,
+    DEFAULT_USER_AGENT,
+    parse_benefit_tier_response,
+)
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 from aistudio_api.infrastructure.browser.scripts import (
     CHECK_IDENTITY_JS,
@@ -70,6 +76,21 @@ def get_auth_user_from_meta(auth_file: str | None) -> str:
         except Exception:
             pass
     return "0"
+
+
+def get_tier_from_meta(auth_file: str | None) -> str:
+    """Read benefit tier from meta.json adjacent to auth_file."""
+    if auth_file:
+        try:
+            meta_path = Path(auth_file).parent / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                tier = str(meta.get("tier") or "Free").strip().capitalize()
+                if tier in ("Free", "Pro", "Ultra", "Plus"):
+                    return tier
+        except Exception:
+            pass
+    return "Free"
 
 
 def get_aistudio_urls(
@@ -135,6 +156,55 @@ async def extract_account_email(page: CDPPage | None) -> str | None:
     return None
 
 
+async def extract_account_tier(
+    page: CDPPage | None, auth_user: str = "0"
+) -> str | None:
+    """Extract authenticated Google AI benefit tier via in-page GetAiStudioBenefitTier XHR."""
+    if page is None or page.is_closed():
+        return None
+    script = """
+    (args) => {
+        return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GetAiStudioBenefitTier');
+            xhr.setRequestHeader('Content-Type', 'application/json+protobuf');
+            xhr.setRequestHeader('X-User-Agent', args.userAgent);
+            xhr.setRequestHeader('X-Goog-Api-Key', args.apiKey);
+            xhr.setRequestHeader('X-Goog-AuthUser', String(args.authUser || '0'));
+            xhr.setRequestHeader('X-Goog-Ext-519733851-bin', args.extBin);
+            xhr.withCredentials = true;
+            xhr.timeout = 8000;
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    resolve({ok: true, text: xhr.responseText || '[]'});
+                } else {
+                    resolve({ok: false, status: xhr.status});
+                }
+            };
+            xhr.onerror = () => resolve({ok: false});
+            xhr.ontimeout = () => resolve({ok: false});
+            xhr.send('[]');
+        });
+    }
+    """
+    try:
+        res = await page.evaluate(
+            script,
+            {
+                "authUser": str(auth_user or "0"),
+                "apiKey": DEFAULT_API_KEY,
+                "userAgent": DEFAULT_USER_AGENT,
+                "extBin": DEFAULT_EXT_BIN,
+            },
+            timeout_s=10.0,
+        )
+        if isinstance(res, dict) and res.get("ok"):
+            return parse_benefit_tier_response(res.get("text"))
+    except Exception as e:
+        log.debug("从页面提取账号订阅等级失败: %s", e)
+    return None
+
+
 async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
     """Verify currently loaded account matches metadata in auth_file."""
     if not auth_file:
@@ -177,6 +247,22 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
                 )
             expected_email = discovered_email.strip().lower()
 
+    if is_on_correct_user and not meta.get("tier"):
+        discovered_tier = await extract_account_tier(page, auth_user=auth_user)
+        if discovered_tier:
+            meta["tier"] = discovered_tier
+            with suppress(Exception):
+                meta_path.write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            with suppress(Exception):
+                from aistudio_api.infrastructure.account.account_store import (
+                    AccountStore,
+                )
+
+                if account_id and account_id != "unknown":
+                    AccountStore().update_account_tier(account_id, discovered_tier)
     if not expected_email:
         return is_on_correct_user
 
@@ -215,9 +301,7 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
         not is_verified
         and auth_user != "0"
         and f"/u/{auth_user}/" in curr_url
-        and (
-            not discovered_email or discovered_email.strip().lower() == expected_email
-        )
+        and (not discovered_email or discovered_email.strip().lower() == expected_email)
     ):
         is_verified = True
 

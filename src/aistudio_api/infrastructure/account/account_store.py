@@ -41,6 +41,7 @@ _SEARCH_ROOTS: list[Path] = [
     .parents[4],  # src/aistudio_api/infrastructure/account -> 项目根
 ]
 
+
 def _safe_account_dir(accounts_dir: Path, account_id: str) -> Path:
     """验证并返回安全的账号子目录路径，防止路径遍历攻击。"""
     raw = str(account_id or "").strip()
@@ -96,6 +97,7 @@ class AccountMeta:
     last_used: str | None = None
     auth_user: str = "0"
     cookie_id: str | None = None
+    tier: str = "Free"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -114,6 +116,7 @@ class AccountMeta:
             cookie_id=str(data["cookie_id"])
             if data.get("cookie_id") is not None
             else None,
+            tier=str(data.get("tier") or "Free"),
         )
 
 
@@ -282,16 +285,20 @@ class AccountStore:
         account_id: str | None = None,
         auth_user: str = "0",
         cookie_id: str | None = None,
+        tier: str = "Free",
     ) -> AccountMeta:
         """保存新账号。"""
         registry = self._load_registry()
         now = datetime.now(UTC).isoformat()
         created_at = now
+        resolved_tier = tier or "Free"
         if account_id is None and email:
             for acc in registry.accounts.values():
                 if acc.email == email and acc.auth_user == auth_user:
                     account_id = acc.id
                     created_at = acc.created_at
+                    if resolved_tier == "Free" and acc.tier and acc.tier != "Free":
+                        resolved_tier = acc.tier
                     break
 
         if account_id is None:
@@ -305,6 +312,7 @@ class AccountStore:
             last_used=now,
             auth_user=auth_user,
             cookie_id=cookie_id,
+            tier=resolved_tier,
         )
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         account_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +365,25 @@ class AccountStore:
         if acc.email == email:
             return False
         acc.email = email
+        account_dir = _safe_account_dir(self._accounts_dir, account_id)
+        meta_path = account_dir / "meta.json"
+        if meta_path.exists():
+            _atomic_write_json(meta_path, acc.to_dict())
+        self._save_registry(registry)
+        return True
+
+    def update_account_tier(self, account_id: str, tier: str) -> bool:
+        """更新账号的订阅权益等级 (Free / Pro / Ultra / Plus)，并持久化 meta.json 与 registry.json。"""
+        registry = self._load_registry()
+        if account_id not in registry.accounts:
+            return False
+        clean_tier = (tier or "Free").strip().capitalize()
+        if clean_tier not in ("Free", "Pro", "Ultra", "Plus"):
+            clean_tier = "Free"
+        acc = registry.accounts[account_id]
+        if acc.tier == clean_tier:
+            return False
+        acc.tier = clean_tier
         account_dir = _safe_account_dir(self._accounts_dir, account_id)
         meta_path = account_dir / "meta.json"
         if meta_path.exists():

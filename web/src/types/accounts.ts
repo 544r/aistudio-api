@@ -8,6 +8,7 @@ export interface Account {
   last_used?: string | null
   auth_user: string
   cookie_id?: string | null
+  tier?: string
 }
 
 export interface AccountWithStats extends Omit<Account, 'last_used'>, Partial<AccountRotationStats> {
@@ -20,6 +21,7 @@ export interface ImportCookiesRequest {
   email?: string
   account_id?: string
   auth_user?: string
+  tier?: string
 }
 
 export interface ImportCookiesResponse {
@@ -28,6 +30,7 @@ export interface ImportCookiesResponse {
   cookie_count: number
   domain_summary: Record<string, number>
   auth_user: string
+  tier?: string
 }
 
 export interface ProbeAndImportRequest {
@@ -46,6 +49,7 @@ export interface BundleAccountItem {
   email?: string
   cookies: string
   auth_user?: string
+  tier?: string
 }
 
 export interface ImportBundleRequest {

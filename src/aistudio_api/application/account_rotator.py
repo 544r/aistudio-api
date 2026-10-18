@@ -439,6 +439,7 @@ class AccountRotator:
             result[account.id] = {
                 "name": account.name,
                 "email": account.email,
+                "tier": getattr(account, "tier", "Free") or "Free",
                 "requests": stats.requests,
                 "success": stats.success,
                 "rate_limited": stats.rate_limited,
@@ -499,6 +500,23 @@ class AccountRotator:
             stats = self._stats.get(account.id, AccountStats(account_id=account.id))
             if stats.is_available(model, ignore_auth_cooldown=ignore_auth_cooldown):
                 available.append((account, stats))
+        if model and available:
+            try:
+                from aistudio_api.infrastructure.gateway.model_discovery import (
+                    model_discovery,
+                )
+
+                tier_matched = [
+                    (acc, st)
+                    for acc, st in available
+                    if model_discovery.is_model_allowed_for_tier(
+                        model, getattr(acc, "tier", "Free")
+                    )
+                ]
+                if tier_matched:
+                    return tier_matched
+            except Exception:
+                pass
         return available
 
     async def get_next_account(

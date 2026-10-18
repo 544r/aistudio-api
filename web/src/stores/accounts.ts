@@ -172,15 +172,30 @@ export const useAccountsStore = defineStore('accounts', () => {
     const toast = useToastStore()
     try {
       const res = await accountsApi.detectEmail(id)
+      const tierSuffix = res.tier ? ` · 等级: ${res.tier}` : ''
       if (res.email) {
-        toast.success(`已成功识别账号邮箱: ${res.email}`)
+        toast.success(`已成功识别账号邮箱: ${res.email}${tierSuffix}`)
       } else {
-        toast.info('未在当前页面识别到有效邮箱')
+        toast.info(`未在当前页面识别到有效邮箱${tierSuffix}`)
       }
       await fetchAll()
       return res
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '识别邮箱失败'
+      toast.error(msg)
+      return null
+    }
+  }
+
+  async function detectAccountTier(id: string) {
+    const toast = useToastStore()
+    try {
+      const res = await accountsApi.detectTier(id)
+      toast.success(`已更新账号订阅等级: ${res.tier || 'Free'}`)
+      await fetchAll()
+      return res
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '探测订阅等级失败'
       toast.error(msg)
       return null
     }
@@ -204,5 +219,6 @@ export const useAccountsStore = defineStore('accounts', () => {
     probeAndImport,
     importBundle,
     detectAccountEmail,
+    detectAccountTier,
   }
 })

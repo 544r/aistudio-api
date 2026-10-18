@@ -236,6 +236,40 @@ def test_update_account_email(tmp_path):
     assert store.update_account_email(acc.id, "real_user@gmail.com") is False
 
 
+def test_parse_benefit_tier_and_update_account_tier(tmp_path):
+    """测试 GetAiStudioBenefitTier 响应解析、请求头映射及账号等级持久化。"""
+    from aistudio_api.infrastructure.account.account_store import AccountStore
+    from aistudio_api.infrastructure.account.cookie_parser import (
+        get_tier_header_value,
+        parse_benefit_tier_response,
+    )
+
+    assert parse_benefit_tier_response("[]") == "Free"
+    assert parse_benefit_tier_response("[null]") == "Free"
+    assert parse_benefit_tier_response("[0]") == "Free"
+    assert parse_benefit_tier_response(")]}'\n[1]") == "Pro"
+    assert parse_benefit_tier_response([2]) == "Ultra"
+    assert parse_benefit_tier_response([3]) == "Plus"
+
+    assert get_tier_header_value("Free") is None
+    assert get_tier_header_value("Pro") == "TIER1"
+    assert get_tier_header_value("Ultra") == "TIER2"
+    assert get_tier_header_value("Plus") == "TIER0"
+
+    store = AccountStore(accounts_dir=tmp_path / "accounts_tier_test")
+    acc = store.save_account(
+        name="Tier Test",
+        email="tier@gmail.com",
+        storage_state={"cookies": []},
+    )
+    assert acc.tier == "Free"
+    assert store.update_account_tier(acc.id, "Pro") is True
+    reloaded = store.get_account(acc.id)
+    assert reloaded is not None
+    assert reloaded.tier == "Pro"
+    assert store.update_account_tier(acc.id, "Pro") is False
+
+
 @pytest.mark.asyncio
 async def test_delete_cookie_group_migrates_active_account(tmp_path):
     """测试批量删除包含当前活跃账号的 Cookie 组时，正确切换活跃账号与浏览器会话。"""

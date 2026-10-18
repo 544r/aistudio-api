@@ -23,6 +23,12 @@ const activeAccountDisplay = computed(() => {
   return (acc.email || acc.name || acc.id) + sub
 })
 
+
+const activeAccountTierDisplay = computed(() => {
+  const acc = accountsStore.activeAccount
+  if (!acc) return undefined
+  return `订阅等级: ${acc.tier || 'Free'}`
+})
 const totalAccountsCount = computed(() => accountsStore.accountRows.length)
 
 const availableAccountsCount = computed(() => {
@@ -50,6 +56,7 @@ usePolling(loadData, 10000)
       <StatCard
         label="当前激活账号"
         :value="activeAccountDisplay"
+        :sub-value="activeAccountTierDisplay"
         :color="accountsStore.activeAccount ? 'green' : 'default'"
       >
         <template #icon>

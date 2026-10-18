@@ -12,7 +12,10 @@ from aistudio_api.api.dependencies import (
     get_runtime_state,
 )
 from aistudio_api.infrastructure.account.account_store import AccountMeta
-from aistudio_api.infrastructure.account.cookie_parser import parse_cookie_string
+from aistudio_api.infrastructure.account.cookie_parser import (
+    parse_cookie_string,
+    probe_account_benefit_tier,
+)
 from aistudio_api.infrastructure.utils.common import mask_email
 
 if TYPE_CHECKING:
@@ -33,6 +36,7 @@ class AccountResponse(BaseModel):
     last_used: str | None
     auth_user: str = "0"
     cookie_id: str | None = None
+    tier: str = "Free"
 
 
 def to_account_response(account: AccountMeta) -> AccountResponse:
@@ -49,6 +53,7 @@ def to_account_response(account: AccountMeta) -> AccountResponse:
         last_used=account.last_used,
         auth_user=getattr(account, "auth_user", "0") or "0",
         cookie_id=cid,
+        tier=getattr(account, "tier", "Free") or "Free",
     )
 
 
@@ -62,6 +67,7 @@ class ImportCookiesRequest(BaseModel):
     email: str | None = None
     account_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_\-\.@]+$")
     auth_user: str = "0"
+    tier: str | None = None
 
 
 class ImportCookiesResponse(BaseModel):
@@ -70,6 +76,7 @@ class ImportCookiesResponse(BaseModel):
     cookie_count: int
     domain_summary: dict[str, int]
     auth_user: str = "0"
+    tier: str = "Free"
 
 
 class ProbeAndImportRequest(BaseModel):
@@ -88,6 +95,7 @@ class BundleAccountItem(BaseModel):
     email: str | None = None
     cookies: str
     auth_user: str = "0"
+    tier: str | None = None
 
 
 class ImportBundleRequest(BaseModel):
@@ -147,7 +155,7 @@ async def detect_account_email(
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> AccountResponse:
-    """从受控浏览器页面自动提取并更新指定账号的真实邮箱。"""
+    """从受控浏览器页面自动提取并更新指定账号的真实邮箱与订阅权益等级。"""
     browser_session = runtime_state.client._session if runtime_state.client else None
     if browser_session is None or browser_session.page is None:
         raise HTTPException(status_code=503, detail="受控浏览器未就绪")
@@ -163,6 +171,66 @@ async def detect_account_email(
     if email:
         account_service.update_account_email(account_id, email)
         log.info("已自动识别并更新账号 %s 邮箱: %s", account_id, mask_email(email))
+
+    if hasattr(browser_session, "extract_account_tier"):
+        try:
+            tier = await browser_session.extract_account_tier()
+            if isinstance(tier, str) and tier:
+                account_service.update_account_tier(account_id, tier)
+                log.info("已自动识别并更新账号 %s 订阅等级: %s", account_id, tier)
+        except Exception as e:
+            log.debug("自动识别账号 %s 订阅等级失败: %s", account_id, e)
+
+    acc = account_service.get_account(account_id)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return to_account_response(acc)
+
+
+@router.post("/{account_id}/detect-tier", response_model=AccountResponse)
+async def detect_account_tier(
+    account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> AccountResponse:
+    """探测并更新指定账号的订阅权益等级 (Free / Pro / Ultra / Plus)。"""
+    import json
+
+    acc = account_service.get_account(account_id)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    detected_tier: str | None = None
+    target_auth = account_service.get_account_auth_path(account_id)
+    browser_session = runtime_state.client._session if runtime_state.client else None
+    if (
+        browser_session is not None
+        and browser_session.page is not None
+        and target_auth
+        and str(target_auth) == browser_session._auth_file
+        and hasattr(browser_session, "extract_account_tier")
+    ):
+        detected_tier = await browser_session.extract_account_tier()
+
+    if not detected_tier and target_auth and target_auth.is_file():
+        try:
+            auth_data = json.loads(target_auth.read_text(encoding="utf-8"))
+            raw_cookies = auth_data.get("cookies") or []
+            cookie_dict = {
+                str(c.get("name") or ""): str(c.get("value") or "")
+                for c in raw_cookies
+                if isinstance(c, dict) and c.get("name")
+            }
+            if cookie_dict:
+                detected_tier = await probe_account_benefit_tier(
+                    cookie_dict, auth_user=acc.auth_user or "0"
+                )
+        except Exception as e:
+            log.debug("通过 HTTP 探测账号 %s 订阅等级失败: %s", account_id, e)
+
+    if detected_tier:
+        account_service.update_account_tier(account_id, detected_tier)
+        log.info("已更新账号 %s 订阅等级: %s", account_id, detected_tier)
 
     acc = account_service.get_account(account_id)
     if not acc:
@@ -294,6 +362,7 @@ async def import_cookies(
     import secrets
 
     cid = f"cookie_{secrets.token_hex(4)}"
+    detected_tier = req.tier or "Free"
     account = account_service.save_account_from_cookies(
         name=name,
         email=req.email,
@@ -301,6 +370,7 @@ async def import_cookies(
         account_id=req.account_id,
         auth_user=req.auth_user or "0",
         cookie_id=cid,
+        tier=detected_tier,
     )
     try:
         browser_session = (
@@ -322,6 +392,7 @@ async def import_cookies(
         cookie_count=cookie_count,
         domain_summary=domain_summary,
         auth_user=account.auth_user,
+        tier=account.tier,
     )
 
 
@@ -382,6 +453,7 @@ async def import_bundle(
                     "email": a.email,
                     "cookies": a.cookies,
                     "auth_user": a.auth_user or "0",
+                    "tier": a.tier or "Free",
                 }
             )
     elif req.content:
@@ -443,6 +515,7 @@ async def import_bundle(
         acc_name = str(item.get("name") or f"Account {idx + 1}")
         acc_email = str(item["email"]) if item.get("email") else None
         acc_auth_user = str(item.get("auth_user") or "0")
+        acc_tier = str(item.get("tier") or "Free")
         cid = f"cookie_{secrets.token_hex(4)}"
 
         account = account_service.save_account_from_cookies(
@@ -451,6 +524,7 @@ async def import_bundle(
             storage_state=storage_state,
             auth_user=acc_auth_user,
             cookie_id=cid,
+            tier=acc_tier,
         )
         imported_accounts.append(to_account_response(account))
 

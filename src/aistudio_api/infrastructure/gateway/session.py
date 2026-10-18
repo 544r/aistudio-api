@@ -28,7 +28,9 @@ from aistudio_api.infrastructure.gateway.session_auth import (
     bootstrap_google_session,
     derive_profile_dir,
     extract_account_email,
+    extract_account_tier,
     get_auth_user_from_meta,
+    get_tier_from_meta,
     is_login_page_url,
     load_cookies_to_page,
     navigate_to_aistudio,
@@ -67,6 +69,7 @@ class BrowserSession:
         self.port = port
         self._auth_file: str | None = settings.auth_file or None
         self._auth_user: str | None = None
+        self._tier: str | None = None
         self._profile_dir = derive_profile_dir(self._auth_file)
         self._proc: ChromiumProcess | None = None
         self._cdp_client: CDPClient | None = None
@@ -120,6 +123,14 @@ class BrowserSession:
         if self._gate.active_context is not None:
             return self._gate.active_context.auth_user
         return get_auth_user_from_meta(self._auth_file)
+
+    def get_current_tier(self) -> str:
+        """获取当前活跃账号的订阅权益等级 (Free / Pro / Ultra / Plus)。"""
+        if self._gate.active_context is not None and self._gate.active_context.tier:
+            return self._gate.active_context.tier
+        if self._tier is not None:
+            return self._tier
+        return get_tier_from_meta(self._auth_file)
 
     @asynccontextmanager
     async def request_scope(self):
@@ -202,10 +213,11 @@ class BrowserSession:
             self._gate.set_preparing()
             old_context = self._gate.active_context
             target_auth_user = get_auth_user_from_meta(auth_file)
+            target_tier = get_tier_from_meta(auth_file)
             self._auth_file = auth_file
             self._auth_user = target_auth_user
+            self._tier = target_tier
             self._profile_dir = derive_profile_dir(auth_file)
-
             try:
                 # Real browser mode
                 if self._proc is None or not self._proc.is_alive():
@@ -241,12 +253,15 @@ class BrowserSession:
                     ),
                 )
 
+                target_tier = get_tier_from_meta(auth_file)
+                self._tier = target_tier
                 new_context = SessionContext(
                     page=new_page,
                     snap_key=snap_key,
                     auth_user=target_auth_user,
                     auth_file=auth_file,
                     base_template=base_template,
+                    tier=target_tier,
                 )
 
                 if (
@@ -298,6 +313,7 @@ class BrowserSession:
                 and context.page.target_id != active_target_id
             ):
                 await self._cdp_client.close_target(context.page.target_id)
+
     async def ensure_botguard_service(self, force_refresh: bool = False) -> CDPPage:
         page = self.page
         curr_url = page.url if page else ""
@@ -396,6 +412,7 @@ class BrowserSession:
             body=body,
             timeout_ms=timeout_ms,
             auth_user=ctx.auth_user,
+            tier=ctx.tier,
         )
 
     async def send_streaming_request(
@@ -423,6 +440,7 @@ class BrowserSession:
                 body=body,
                 timeout_ms=timeout_ms,
                 auth_user=ctx.auth_user,
+                tier=ctx.tier,
             ):
                 yield event
         finally:
@@ -481,6 +499,11 @@ class BrowserSession:
     async def extract_account_email(self, page: CDPPage | None = None) -> str | None:
         target = page or (self.active_context.page if self.active_context else None)
         return await extract_account_email(target)
+
+    async def extract_account_tier(self, page: CDPPage | None = None) -> str | None:
+        target = page or (self.active_context.page if self.active_context else None)
+        auth_user = self.get_current_auth_user()
+        return await extract_account_tier(target, auth_user=auth_user)
 
     async def reload_current_account_cookies(self, page: CDPPage | None = None) -> bool:
         target = page or (self.active_context.page if self.active_context else None)

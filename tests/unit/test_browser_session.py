@@ -451,3 +451,81 @@ async def test_browser_session_enable_temporary_chat(mock_cdp_page):
     mock_cdp_page.evaluate.assert_called_once()
     expr = mock_cdp_page.evaluate.call_args[0][0]
     assert "temporary" in expr.lower()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_botguard_in_page_interception_zero_quota(mock_cdp_page):
+    """Verify bootstrap_botguard_and_template captures in-page aborted GenerateContent template without network round-trip."""
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        bootstrap_botguard_and_template,
+    )
+
+    mock_cdp_page.title = AsyncMock(return_value="Google AI Studio")
+
+    async def fake_eval(expr, *args, **kwargs):
+        if "isSnapCandidate" in expr:
+            return "hooked:snap_fn_key"
+        if "window.__AISTUDIO__?.service" in expr:
+            return True
+        if "window.__AISTUDIO__?.capturedTemplate" in expr:
+            return {
+                "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+                "headers": {
+                    "Content-Type": "application/json+protobuf",
+                    "X-Goog-Api-Key": "AIzaSyTest",
+                },
+                "body": '["models/gemini-3.8-flash",[[[[null,"say \'1\'"]],"user"]]]',
+            }
+        if "runBtn" in expr:
+            return True
+        return None
+
+    mock_cdp_page.evaluate.side_effect = fake_eval
+
+    snap_key, captured = await bootstrap_botguard_and_template(
+        mock_cdp_page, max_wait_seconds=2
+    )
+    assert snap_key == "snap_fn_key"
+    assert "GenerateContent" in str(captured.get("url"))
+    assert "gemini-3.8-flash" in str(captured.get("body"))
+
+
+@pytest.mark.asyncio
+async def test_transport_injects_and_strips_g1_tier_header(mock_cdp_page):
+    """Verify _ensure_authorization_header sets X-AIStudio-G1-Tier for Pro/Ultra/Plus and strips stale header for Free."""
+    from aistudio_api.infrastructure.gateway.transport import (
+        _ensure_authorization_header,
+    )
+
+    mock_cdp_page._cached_cookies = {"SAPISID": "test_sapisid_value"}
+
+    # 1. Pro account injects TIER1
+    pro_headers = await _ensure_authorization_header(
+        mock_cdp_page,
+        {"Content-Type": "application/json+protobuf"},
+        auth_user="1",
+        tier="Pro",
+    )
+    assert pro_headers["X-Goog-AuthUser"] == "1"
+    assert pro_headers["X-AIStudio-G1-Tier"] == "TIER1"
+
+    # 2. Ultra account injects TIER2
+    ultra_headers = await _ensure_authorization_header(
+        mock_cdp_page,
+        {"Content-Type": "application/json+protobuf"},
+        auth_user="0",
+        tier="Ultra",
+    )
+    assert ultra_headers["X-AIStudio-G1-Tier"] == "TIER2"
+
+    # 3. Free account strips any stale X-AIStudio-G1-Tier from previous template
+    free_headers = await _ensure_authorization_header(
+        mock_cdp_page,
+        {
+            "Content-Type": "application/json+protobuf",
+            "X-AIStudio-G1-Tier": "TIER1",
+        },
+        auth_user="0",
+        tier="Free",
+    )
+    assert "X-AIStudio-G1-Tier" not in free_headers
