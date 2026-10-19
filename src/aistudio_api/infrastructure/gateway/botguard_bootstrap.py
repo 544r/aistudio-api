@@ -24,6 +24,12 @@ BOTGUARD_BOOTSTRAP_PROMPT = "say '1'"
 
 async def install_page_hooks(page: CDPPage) -> str:
     """Install WAA service hooks on page and extract snapshot function key."""
+    initial_url = getattr(page, "url", "") or ""
+    if is_login_page_url(initial_url):
+        raise SessionExpiredError(
+            f"Cookie 认证失效，当前页面为 Google 登录页: {initial_url}"
+        )
+
     result = await page.evaluate(INSTALL_HOOKS_JS)
     if result == "already_hooked":
         snap_key = await page.evaluate("() => window.__AISTUDIO__?.snapKey || ''")
@@ -35,6 +41,11 @@ async def install_page_hooks(page: CDPPage) -> str:
 
     for _ in range(3):
         await page.wait_for_timeout(1500)
+        curr_url = getattr(page, "url", "") or ""
+        if is_login_page_url(curr_url):
+            raise SessionExpiredError(
+                f"Cookie 认证失效，当前页面为 Google 登录页: {curr_url}"
+            )
         result = await page.evaluate(INSTALL_HOOKS_JS)
         if result == "already_hooked":
             snap_key = await page.evaluate("() => window.__AISTUDIO__?.snapKey || ''")
@@ -45,7 +56,18 @@ async def install_page_hooks(page: CDPPage) -> str:
             return result.split(":", 1)[1]
 
     page_url = getattr(page, "url", "(unknown)")
+    if is_login_page_url(str(page_url)):
+        raise SessionExpiredError(
+            f"Cookie 认证失效，当前页面为 Google 登录页: {page_url}"
+        )
     page_title = await page.title()
+    if (
+        isinstance(page_title, str)
+        and "sign in - google accounts" in page_title.lower()
+    ):
+        raise SessionExpiredError(
+            f"Cookie 认证失效，当前页面为 Google 登录页: {page_url} (title={page_title!r})"
+        )
     raise RuntimeError(
         f"Hook install failed: {result} (url={page_url}, title={page_title!r})"
     )
@@ -142,7 +164,10 @@ async def bootstrap_botguard_and_template(
         raise RuntimeError(
             "Google AI Studio 地区限制: 访问被重定向至 available-regions"
         )
-
+    if is_login_page_url(current_url):
+        raise SessionExpiredError(
+            f"Cookie 认证失效，当前页面为 Google 登录页: {current_url}"
+        )
     snap_key = await install_page_hooks(page)
 
     t0 = time.time()
@@ -226,12 +251,6 @@ async def bootstrap_botguard_and_template(
 
             curr_url = getattr(page, "url", "") or ""
             if is_login_page_url(curr_url):
-                log.warning(
-                    "BotGuard 捕获期间检测到登录页重定向: %s，尝试重新注入 Cookie...",
-                    curr_url,
-                )
-                if reload_cookies_cb and await reload_cookies_cb(page):
-                    break
                 raise SessionExpiredError(
                     f"Cookie 认证失效，已跳转至登录页: {curr_url}"
                 )

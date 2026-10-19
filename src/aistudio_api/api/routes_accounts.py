@@ -147,6 +147,9 @@ async def activate_account(
     account = await account_service.activate_account(account_id, browser_session)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在或切换失败")
+    if runtime_state.rotator:
+        runtime_state.rotator.add_account(account.id)
+        runtime_state.rotator.clear_cooldown(account.id)
     log.info("手动激活账号: %s (%s)", account.id, account.name)
     return to_account_response(account)
 
@@ -447,6 +450,9 @@ async def import_cookies(
         cookie_id=cid,
         tier=detected_tier,
     )
+    if runtime_state.rotator:
+        runtime_state.rotator.add_account(account.id)
+        runtime_state.rotator.clear_cooldown(account.id)
     try:
         browser_session = (
             runtime_state.client._session if runtime_state.client else None
@@ -474,6 +480,7 @@ async def import_cookies(
 async def probe_and_import(
     req: ProbeAndImportRequest,
     account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ProbeAndImportResponse:
     """单份 Cookie 无限向下探活多账号并一键批量导入。"""
     from aistudio_api.infrastructure.account.cookie_parser import (
@@ -481,6 +488,7 @@ async def probe_and_import(
         probe_google_accounts_infinite,
     )
 
+    had_active_account = account_service.get_active_account() is not None
     probed = await probe_google_accounts_infinite(req.cookies)
     if not probed:
         raise HTTPException(status_code=400, detail="未探测到有效已登录 Google 账号")
@@ -496,8 +504,19 @@ async def probe_and_import(
         prefix=prefix,
         cookie_id=cid,
     )
+    rotator = getattr(runtime_state, "rotator", None)
+    if rotator:
+        for meta in metas:
+            rotator.add_account(meta.id)
+            rotator.clear_cooldown(meta.id)
+
     imported_accounts = [to_account_response(account) for account in metas]
 
+    client_obj = getattr(runtime_state, "client", None)
+    if not had_active_account and metas and client_obj is not None:
+        browser_session = client_obj._session
+        if browser_session is not None:
+            await account_service.activate_account(metas[0].id, browser_session)
     log.info("探活与导入完成: 成功导入 %d 个账号", len(imported_accounts))
     return ProbeAndImportResponse(
         imported_count=len(imported_accounts),
@@ -509,6 +528,7 @@ async def probe_and_import(
 async def import_bundle(
     req: ImportBundleRequest,
     account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ImportBundleResponse:
     """批量导入多个账号的凭据 Bundle（支持传入 JSON 文本、直接解析列表或服务器本地文件路径）。"""
     import json
@@ -622,8 +642,11 @@ async def import_bundle(
             cookie_id=cid,
             tier=acc_tier,
         )
+        rotator = getattr(runtime_state, "rotator", None)
+        if rotator:
+            rotator.add_account(account.id)
+            rotator.clear_cooldown(account.id)
         imported_accounts.append(to_account_response(account))
-
     if not account_service.get_active_account() and imported_accounts:
         account_service.set_active_account(imported_accounts[0].id)
     log.info("批量文件导入完成: 成功入库 %d 个账号", len(imported_accounts))

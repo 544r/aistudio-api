@@ -529,3 +529,91 @@ async def test_transport_injects_and_strips_g1_tier_header(mock_cdp_page):
         tier="Free",
     )
     assert "X-AIStudio-G1-Tier" not in free_headers
+
+
+@pytest.mark.asyncio
+async def test_hook_install_rejects_google_login_page_before_evaluation(mock_cdp_page):
+    """Verify install_page_hooks immediately raises SessionExpiredError on Google login page (PR #1 & Issue #6)."""
+    from aistudio_api.domain.errors import SessionExpiredError
+    from aistudio_api.infrastructure.gateway.botguard_bootstrap import (
+        install_page_hooks,
+    )
+
+    mock_cdp_page.url = (
+        "https://accounts.google.com/v3/signin/identifier?"
+        "continue=https://aistudio.google.com/u/5/prompts/new_chat"
+    )
+
+    with pytest.raises(SessionExpiredError):
+        await install_page_hooks(mock_cdp_page)
+
+    mock_cdp_page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_navigate_to_aistudio_re_navigates_after_cookie_reinjection(
+    mock_cdp_page, monkeypatch
+):
+    """Regression for Issue #6:
+    After redirecting to login page and re-injecting cookies, navigate_to_aistudio must
+    re-navigate to AI Studio and verify page readiness instead of returning early on the login page.
+    """
+    from aistudio_api.domain.errors import SessionExpiredError
+    from aistudio_api.infrastructure.gateway import session_auth
+
+    login_url = (
+        "https://accounts.google.com/v3/signin/identifier?"
+        "continue=https://aistudio.google.com/prompts/new_chat"
+    )
+    aistudio_url = "https://aistudio.google.com/prompts/new_chat?model=gemini-3.7-flash&temporary=true"
+
+    goto_calls: list[str] = []
+
+    async def fake_goto_recover(url, **kwargs):
+        goto_calls.append(url)
+        mock_cdp_page.url = login_url if len(goto_calls) == 1 else aistudio_url
+
+    mock_cdp_page.goto = AsyncMock(side_effect=fake_goto_recover)
+    mock_cdp_page.evaluate = AsyncMock(
+        side_effect=lambda expr, *a, **kw: (
+            mock_cdp_page.url
+            if "location.href" in expr
+            else (True if "default_MakerSuite" in expr else None)
+        )
+    )
+    monkeypatch.setattr(
+        session_auth, "load_cookies_to_page", AsyncMock(return_value=True)
+    )
+    mock_verify = AsyncMock(return_value=True)
+    mock_save = AsyncMock()
+
+    await session_auth.navigate_to_aistudio(
+        mock_cdp_page,
+        auth_user="0",
+        auth_file="/data/auth.json",
+        verify_identity_cb=mock_verify,
+        save_cookies_cb=mock_save,
+    )
+
+    assert len(goto_calls) == 2
+    mock_verify.assert_awaited_once()
+    mock_save.assert_awaited_once()
+
+    # Case 2: If still stuck on login page after re-injecting cookies and re-navigating,
+    # must raise SessionExpiredError immediately!
+    goto_calls.clear()
+
+    async def fake_goto_stuck(url, **kwargs):
+        goto_calls.append(url)
+        mock_cdp_page.url = login_url
+
+    mock_cdp_page.goto = AsyncMock(side_effect=fake_goto_stuck)
+    with pytest.raises(SessionExpiredError):
+        await session_auth.navigate_to_aistudio(
+            mock_cdp_page,
+            auth_user="0",
+            auth_file="/data/auth.json",
+            verify_identity_cb=mock_verify,
+            save_cookies_cb=mock_save,
+        )
+    assert len(goto_calls) == 2

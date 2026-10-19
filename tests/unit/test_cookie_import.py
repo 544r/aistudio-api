@@ -270,7 +270,6 @@ def test_parse_benefit_tier_and_update_account_tier(tmp_path):
     assert store.update_account_tier(acc.id, "Pro") is False
 
 
-
 def test_parse_emails_from_ogs_html_and_meta_reconciliation(tmp_path):
     """测试 Google OGS/AI Studio HTML 邮箱提取以及 meta.json 与 registry.json 自动对齐。"""
     import json
@@ -312,6 +311,7 @@ def test_parse_emails_from_ogs_html_and_meta_reconciliation(tmp_path):
     assert reloaded is not None
     assert reloaded.email == "reconciled@gmail.com"
     assert reloaded.tier == "Pro"
+
 
 @pytest.mark.asyncio
 async def test_delete_cookie_group_migrates_active_account(tmp_path):
@@ -378,3 +378,56 @@ async def test_delete_cookie_group_migrates_active_account(tmp_path):
     assert new_active.id == acc3.id
     # 且触发了 browser_session.switch_auth
     assert mock_session.switch_auth.called
+
+
+@pytest.mark.asyncio
+async def test_probe_import_activates_first_account_and_registers_in_rotator(
+    monkeypatch,
+):
+    """Verify probe_and_import registers accounts in rotator and activates first account when registry was empty (PR #1 & Issue #7)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aistudio_api.api.routes_accounts import (
+        ProbeAndImportRequest,
+        probe_and_import,
+    )
+    from aistudio_api.infrastructure.account import cookie_parser
+    from aistudio_api.infrastructure.account.account_store import AccountMeta
+
+    imported = AccountMeta(
+        id="acc_new",
+        name="New u/0",
+        email="new@gmail.com",
+        created_at="2026-09-27T00:00:00+00:00",
+        auth_user="0",
+        cookie_id="cookie_new",
+    )
+    account_service = MagicMock()
+    account_service.get_active_account.return_value = None
+    account_service.batch_import_accounts.return_value = [imported]
+    account_service.activate_account = AsyncMock(return_value=imported)
+
+    browser_session = MagicMock()
+    rotator = MagicMock()
+    runtime_state = MagicMock()
+    runtime_state.client._session = browser_session
+    runtime_state.rotator = rotator
+
+    monkeypatch.setattr(
+        cookie_parser,
+        "probe_google_accounts_infinite",
+        AsyncMock(return_value=[{"auth_user": "0", "status_code": 200}]),
+    )
+
+    response = await probe_and_import(
+        ProbeAndImportRequest(cookies="SAPISID=test-value"),
+        account_service=account_service,
+        runtime_state=runtime_state,
+    )
+
+    assert response.imported_count == 1
+    rotator.add_account.assert_called_once_with("acc_new")
+    rotator.clear_cooldown.assert_called_once_with("acc_new")
+    account_service.activate_account.assert_awaited_once_with(
+        "acc_new", browser_session
+    )

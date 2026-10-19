@@ -482,8 +482,14 @@ class AccountRotator:
         return result
 
     def get_account_stats(self, account_id: str) -> AccountStats | None:
-        """获取指定账号的统计对象。"""
-        return self._stats.get(account_id)
+        """获取指定账号的统计对象（若账号已存在于存储层但尚未登记，自动补齐默认统计）。"""
+        stats = self._stats.get(account_id)
+        if stats is None and any(
+            a.id == account_id for a in self._store.list_accounts()
+        ):
+            stats = AccountStats(account_id=account_id)
+            self._stats[account_id] = stats
+        return stats
 
     def is_account_available(self, account_id: str, model: str | None = None) -> bool:
         """检查指定账号在特定模型下是否健康可用。"""
@@ -497,7 +503,9 @@ class AccountRotator:
         accounts = self._store.list_accounts()
         available: list[tuple[AccountMeta, AccountStats]] = []
         for account in accounts:
-            stats = self._stats.get(account.id, AccountStats(account_id=account.id))
+            stats = self._stats.setdefault(
+                account.id, AccountStats(account_id=account.id)
+            )
             if stats.is_available(model, ignore_auth_cooldown=ignore_auth_cooldown):
                 available.append((account, stats))
         if model and available:
@@ -684,9 +692,10 @@ class AccountRotator:
 
     def clear_cooldown(self, account_id: str, model: str | None = None) -> None:
         """清除指定账号的 429 锁定。"""
-        if account_id in self._stats:
-            self._stats[account_id].clear_cooldown(model)
-            logger.info("已手动清除账号 %s 锁定 (model=%s)", account_id, model)
+        if account_id not in self._stats:
+            self._stats[account_id] = AccountStats(account_id=account_id)
+        self._stats[account_id].clear_cooldown(model)
+        logger.info("已手动清除账号 %s 锁定 (model=%s)", account_id, model)
 
         self.save_state()
 

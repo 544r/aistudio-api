@@ -58,6 +58,17 @@ def is_login_page_url(url: str | None) -> bool:
     )
 
 
+def is_aistudio_page_url(url: str | None) -> bool:
+    """True if URL points to aistudio.google.com and is not a Google login page."""
+    if not url or is_login_page_url(url):
+        return False
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+        return host == "aistudio.google.com" or host.endswith(".aistudio.google.com")
+    except Exception:
+        return False
+
+
 def derive_profile_dir(auth_file: str | None) -> str | None:
     """Derive user data profile directory corresponding to an auth file."""
     if not auth_file:
@@ -406,6 +417,45 @@ async def bootstrap_google_session(page: CDPPage) -> None:
     raise RuntimeError(f"bootstrap stayed on login flow: url={page.url}")
 
 
+async def _goto_url_with_abort_tolerance(
+    page: CDPPage, url: str, auth_user: str = "0"
+) -> str:
+    """Navigate page to target AI Studio URL, tolerating net::ERR_ABORTED if already on target."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout_s=20.0)
+    except RuntimeError as nav_exc:
+        if "net::ERR_ABORTED" in str(nav_exc):
+            curr = page.url or ""
+            with suppress(Exception):
+                eval_url = await page.evaluate(
+                    "() => window.location.href", timeout_s=2.0
+                )
+                if eval_url:
+                    curr = str(eval_url)
+            expected_match = (
+                f"/u/{auth_user}/"
+                if auth_user and auth_user != "0"
+                else "aistudio.google.com"
+            )
+            curr_parsed = urlsplit(curr)
+            if is_aistudio_page_url(curr) and (
+                expected_match in curr_parsed.path
+                or expected_match == "aistudio.google.com"
+            ):
+                log.debug("页面导航被终止但已处于 AI Studio 域: %s", curr)
+            else:
+                raise
+        else:
+            raise
+
+    current_url = page.url or ""
+    with suppress(Exception):
+        eval_url = await page.evaluate("() => window.location.href", timeout_s=2.0)
+        if eval_url:
+            current_url = str(eval_url)
+    return current_url
+
+
 async def navigate_to_aistudio(
     page: CDPPage,
     auth_user: str = "0",
@@ -418,45 +468,9 @@ async def navigate_to_aistudio(
     target_urls = get_aistudio_urls(auth_user=auth_user)
     for url in target_urls:
         try:
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout_s=20.0)
-            except RuntimeError as nav_exc:
-                if "net::ERR_ABORTED" in str(nav_exc):
-                    curr = page.url or ""
-                    with suppress(Exception):
-                        eval_url = await page.evaluate(
-                            "() => window.location.href", timeout_s=2.0
-                        )
-                        if eval_url:
-                            curr = str(eval_url)
-                    expected_match = (
-                        f"/u/{auth_user}/"
-                        if auth_user and auth_user != "0"
-                        else "aistudio.google.com"
-                    )
-                    curr_parsed = urlsplit(curr)
-                    curr_host = (curr_parsed.hostname or "").lower()
-                    is_aistudio = (
-                        curr_host == "aistudio.google.com"
-                        or curr_host.endswith(".aistudio.google.com")
-                    )
-                    if is_aistudio and (
-                        expected_match in curr_parsed.path
-                        or expected_match == "aistudio.google.com"
-                    ):
-                        log.debug("页面导航被终止但已处于 AI Studio 域: %s", curr)
-                    else:
-                        raise
-                else:
-                    raise
-
-            current_url = page.url or ""
-            with suppress(Exception):
-                eval_url = await page.evaluate(
-                    "() => window.location.href", timeout_s=2.0
-                )
-                if eval_url:
-                    current_url = str(eval_url)
+            current_url = await _goto_url_with_abort_tolerance(
+                page, url, auth_user=auth_user
+            )
 
             if "available-regions" in current_url:
                 raise RuntimeError(
@@ -467,17 +481,35 @@ async def navigate_to_aistudio(
                     "访问 AI Studio 后检测到重定向至登录页: %s，尝试重新注入 Cookie...",
                     current_url,
                 )
-                if await load_cookies_to_page(page, auth_file):
-                    return
-                raise SessionExpiredError(
-                    f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
+                if not await load_cookies_to_page(page, auth_file):
+                    raise SessionExpiredError(
+                        f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
+                    )
+                current_url = await _goto_url_with_abort_tolerance(
+                    page, url, auth_user=auth_user
                 )
+                if "available-regions" in current_url:
+                    raise RuntimeError(
+                        f"Google AI Studio 地区限制 (IP 漏了/不支持): {current_url}"
+                    )
+                if is_login_page_url(current_url) or not is_aistudio_page_url(
+                    current_url
+                ):
+                    raise SessionExpiredError(
+                        f"Cookie 认证失败，重新注入并导航后仍处于登录页。 (url={current_url})"
+                    )
 
             for _ in range(15):
                 with suppress(Exception):
                     if await page.evaluate("() => !!window.default_MakerSuite"):
                         break
                 await page.wait_for_timeout(500)
+
+            curr_after_wait = getattr(page, "url", "") or ""
+            if is_login_page_url(curr_after_wait):
+                raise SessionExpiredError(
+                    f"Cookie 认证失败，等待页面就绪期间重定向到 Google 登录页。 (url={curr_after_wait})"
+                )
 
             if verify_identity_cb is not None:
                 is_verified = await verify_identity_cb(page)
@@ -491,7 +523,11 @@ async def navigate_to_aistudio(
                     await save_browser_cookies(page, auth_file)
             return
         except Exception as exc:
-            if "地区限制" in str(exc) or "Cookie 认证失败" in str(exc):
+            if (
+                isinstance(exc, SessionExpiredError)
+                or "地区限制" in str(exc)
+                or "Cookie 认证失败" in str(exc)
+            ):
                 raise exc
             log.debug("访问 %s 失败: %s", url, exc)
             last_exc = exc

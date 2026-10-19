@@ -31,6 +31,7 @@ from aistudio_api.infrastructure.gateway.session_auth import (
     extract_account_tier,
     get_auth_user_from_meta,
     get_tier_from_meta,
+    is_aistudio_page_url,
     is_login_page_url,
     load_cookies_to_page,
     navigate_to_aistudio,
@@ -48,6 +49,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 log = get_logger("session")
 
 _is_login_page_url = is_login_page_url
+_is_aistudio_page_url = is_aistudio_page_url
 
 DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
     "url": "https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
@@ -181,7 +183,11 @@ class BrowserSession:
         idle_timeout = getattr(settings, "browser_idle_timeout", 0)
         if idle_timeout <= 0:
             return False
-        if self._in_flight <= 0 and self._proc is not None:
+        if (
+            self._in_flight <= 0
+            and self._proc is not None
+            and self._gate.state != SessionState.PREPARING
+        ):
             idle_duration = time.time() - self._last_activity_time
             if idle_duration >= idle_timeout:
                 log.info(
@@ -210,6 +216,7 @@ class BrowserSession:
             ):
                 return self._gate.active_context
 
+            self._last_activity_time = time.time()
             self._gate.set_preparing()
             old_context = self._gate.active_context
             target_auth_user = get_auth_user_from_meta(auth_file)
@@ -529,6 +536,9 @@ class BrowserSession:
         if profile_dir:
             Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
+        # 冷启动浏览器需 ~20s，期间 _proc 已非空但请求可能尚未进入 request_scope()；
+        # 启动即刷新活跃时间戳，防止空闲回收器按旧时间戳误杀刚拉起的浏览器进程。
+        self._last_activity_time = time.time()
         self._proc = launch_chromium_process(
             port=self.port,
             user_data_dir=profile_dir,
@@ -562,5 +572,6 @@ __all__ = [
     "BOTGUARD_BOOTSTRAP_PROMPT",
     "DEFAULT_BOOTSTRAP_TEMPLATE",
     "BrowserSession",
+    "_is_aistudio_page_url",
     "_is_login_page_url",
 ]

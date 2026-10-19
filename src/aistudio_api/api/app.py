@@ -100,8 +100,8 @@ async def lifespan(_app: FastAPI):
                         runtime_state.client, "_session", None
                     ):
                         await runtime_state.client._session.check_idle_timeout()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("空闲回收检查异常: %s", e)
 
         idle_task = asyncio.create_task(_idle_monitor())
 
