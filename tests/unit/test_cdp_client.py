@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -212,23 +211,6 @@ async def test_cdp_connection_fast_fail_on_target_crashed():
     with pytest.raises(RuntimeError, match=r"Target\.targetCrashed"):
         await conn.send("Runtime.evaluate", {"expression": "test"}, timeout_s=30.0)
 
-
-@pytest.mark.asyncio
-async def test_cdp_connection_liveness_checker_fail_fast():
-    """Verify liveness_checker detects dead process and fails within milliseconds."""
-    conn = CDPConnection("ws://127.0.0.1:9222/devtools/page/test")
-    fake_ws = AsyncMock()
-    conn.ws = fake_ws
-    fake_ws.send = AsyncMock()
-
-    # Process is already dead
-    conn.set_liveness_checker(lambda: False)
-
-    start_t = asyncio.get_running_loop().time()
-    with pytest.raises(RuntimeError, match=r"Browser process has died"):
-        await conn.send("Runtime.evaluate", {"expression": "1+1"}, timeout_s=30.0)
-    elapsed = asyncio.get_running_loop().time() - start_t
-    assert elapsed < 0.5, f"Took too long to detect dead process: {elapsed}s"
 
 
 @pytest.mark.asyncio

@@ -45,7 +45,6 @@ logger = get_logger("server")
 async def lifespan(_app: FastAPI):
     from aistudio_api.application.account_rotator import init_rotator
     from aistudio_api.application.account_service import AccountService
-    from aistudio_api.config import settings
     from aistudio_api.infrastructure.account.account_store import AccountStore
     from aistudio_api.infrastructure.browser.browser_engine import (
         install_process_cleanup_handlers,
@@ -88,22 +87,6 @@ async def lifespan(_app: FastAPI):
                 logger.warning("浏览器预热失败: %s", e)
 
     warmup_task = asyncio.create_task(_warmup())
-
-    idle_task = None
-    if settings.browser_idle_timeout > 0:
-
-        async def _idle_monitor():
-            while True:
-                await asyncio.sleep(10.0)
-                try:
-                    if runtime_state.client and getattr(
-                        runtime_state.client, "_session", None
-                    ):
-                        await runtime_state.client._session.check_idle_timeout()
-                except Exception as e:
-                    logger.debug("空闲回收检查异常: %s", e)
-
-        idle_task = asyncio.create_task(_idle_monitor())
 
     tier_task = None
 
@@ -154,8 +137,6 @@ async def lifespan(_app: FastAPI):
     logger.info("服务正在关闭")
     if warmup_task and not warmup_task.done():
         warmup_task.cancel()
-    if idle_task and not idle_task.done():
-        idle_task.cancel()
     if tier_task and not tier_task.done():
         tier_task.cancel()
     if client:

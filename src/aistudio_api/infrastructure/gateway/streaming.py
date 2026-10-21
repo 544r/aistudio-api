@@ -143,12 +143,16 @@ class StreamingGateway:
         )
         if status_code != 200:
             detail = _summarize_error_body(raw_response)
-            if status_code in (401, 403, 429):
+            if (
+                status_code in (401, 403, 429)
+                or "[,[" in raw_response
+                or "[null,[" in raw_response
+                or raw_response.lstrip().startswith("[,")
+            ):
                 raise classify_error(status_code, raw_response)
             if detail:
                 raise RequestError(status_code, detail)
             raise RequestError(status_code, "")
-
         if latest_finish_reason is not None:
             yield ("finish_reason", latest_finish_reason)
         yield ("usage", latest_usage)

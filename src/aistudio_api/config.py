@@ -235,19 +235,6 @@ def resolve_locale() -> str:
     return "en-US"
 
 
-def _resolve_default_idle_timeout() -> int:
-    env_val = os.getenv("AISTUDIO_BROWSER_IDLE_TIMEOUT")
-    if env_val is not None and env_val.strip() != "":
-        return int(env_val)
-    if (
-        "com.termux" in os.getenv("PREFIX", "")
-        or "com.termux" in os.getenv("PATH", "")
-        or os.getenv("ANDROID_ROOT") is not None
-    ):
-        return 900
-    return 1800
-
-
 @dataclass(slots=True)
 class Settings:
     port: int = int(os.getenv("AISTUDIO_PORT", "8080"))
@@ -256,14 +243,13 @@ class Settings:
     )
     browser_headless: bool = _load_bool_env("AISTUDIO_BROWSER_HEADLESS", default=True)
     browser_executable_path: str | None = os.getenv("AISTUDIO_BROWSER_EXECUTABLE")
-    browser_idle_timeout: int = _resolve_default_idle_timeout()
     auth_file: str | None = discover_auth_file()
     tmp_dir: str = os.getenv("AISTUDIO_TMP_DIR", tempfile.gettempdir())
     proxy_url: str | None = discover_proxy_url()
     web_password: str | None = _load_web_password()
     api_keys: frozenset[str] = frozenset()
-    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "120"))
-    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "120"))
+    timeout_replay: int = int(os.getenv("AISTUDIO_TIMEOUT_REPLAY", "600"))
+    timeout_stream: int = int(os.getenv("AISTUDIO_TIMEOUT_STREAM", "600"))
     timezone: str = resolve_timezone()
     locale: str = resolve_locale()
     dump_raw_response: bool = os.getenv("AISTUDIO_DUMP_RAW_RESPONSE", "0") in (
