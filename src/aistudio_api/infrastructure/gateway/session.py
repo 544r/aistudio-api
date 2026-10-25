@@ -259,7 +259,7 @@ class BrowserSession:
                     drain_task.add_done_callback(self._background_tasks.discard)
                 self._gate.set_ready(new_context)
                 log.info(
-                    "会话蓝绿平滑热切成功: auth_file=%s, u/%s (活跃在途=%d)",
+                    "会话切换完成: auth_file=%s, u/%s (活跃在途=%d)",
                     auth_file,
                     target_auth_user,
                     self._in_flight,

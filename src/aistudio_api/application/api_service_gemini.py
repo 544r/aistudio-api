@@ -352,13 +352,15 @@ async def handle_gemini_generate_content(
                 sanitize_plain_text=False,
             )
 
-            record_rotator_event("success", model=normalized.model)
-            runtime_state.record(normalized.model, "success", output.usage)
-            logger.info(
-                "Gemini 生成完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
+            final_fr = to_gemini_finish_reason(
+                output.candidates[0].finish_reason if output.candidates else None
+            )
+            record_rotator_event("success", model=normalized.model, usage=output.usage)
+            runtime_state.record(
                 normalized.model,
-                output.usage.get("prompt_tokens") if output.usage else 0,
-                output.usage.get("completion_tokens") if output.usage else 0,
+                "success",
+                usage=output.usage,
+                finish_reason=final_fr,
             )
             return GeminiGenerateContentResponse(
                 candidates=[
@@ -596,15 +598,16 @@ def _build_gemini_streaming_response(
                     raise
 
             target_model = normalized.model if normalized else model_path
-            record_rotator_event("success", model=target_model)
-            if normalized is not None:
-                runtime_state.record(normalized.model, "success", final_usage)
-            logger.info(
-                "Gemini 流式完成: model=%s, 输入Tokens=%s, 输出Tokens=%s",
-                target_model,
-                final_usage.get("prompt_tokens") if final_usage else 0,
-                final_usage.get("completion_tokens") if final_usage else 0,
+            record_rotator_event(
+                "success", model=target_model, usage=final_usage
             )
+            if normalized is not None:
+                runtime_state.record(
+                    normalized.model,
+                    "success",
+                    usage=final_usage,
+                    finish_reason=final_finish_reason,
+                )
             yield format_sse_usage(
                 final_usage,
                 finish_reason=final_finish_reason,
