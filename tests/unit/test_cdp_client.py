@@ -212,7 +212,6 @@ async def test_cdp_connection_fast_fail_on_target_crashed():
         await conn.send("Runtime.evaluate", {"expression": "test"}, timeout_s=30.0)
 
 
-
 @pytest.mark.asyncio
 async def test_cdp_client_connect_page_success_and_prune():
     """Verify connect_page connects to main page and prunes extra spare pages."""
@@ -220,12 +219,28 @@ async def test_cdp_client_connect_page_success_and_prune():
 
     client = CDPClient(port=9222)
     client.wait_until_ready = AsyncMock()
-
     fake_targets = [
-        {"id": "t1", "type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p1"},
-        {"id": "t2", "type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p2"},
+        {
+            "id": "t1",
+            "type": "page",
+            "url": "https://aistudio.google.com/",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p1",
+        },
+        {
+            "id": "t2",
+            "type": "page",
+            "url": "about:blank",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p2",
+        },
+        {
+            "id": "t3",
+            "type": "page",
+            "url": "https://aistudio.google.com/u/1/",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/p3",
+        },
     ]
     client.get_targets = AsyncMock(return_value=fake_targets)
+    client.close_target = AsyncMock()
 
     with patch(
         "aistudio_api.infrastructure.browser.cdp_client.CDPConnection"
@@ -240,3 +255,4 @@ async def test_cdp_client_connect_page_success_and_prune():
         ):
             page = await client.connect_page(block_assets=True)
             assert page.target_id == "t1"
+            client.close_target.assert_awaited_once_with("t2")

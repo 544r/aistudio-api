@@ -12,6 +12,7 @@ class GeminiUsageMetadata(BaseModel):
     candidatesTokenCount: int = 0
     thoughtsTokenCount: int = 0
     totalTokenCount: int = 0
+    cachedContentTokenCount: int | None = None
 
 
 class GeminiFunctionCallPayload(BaseModel):
