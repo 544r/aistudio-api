@@ -80,6 +80,11 @@ class AIStudioClient:
             await self._session.ensure_botguard_service()
             logger.info("浏览器预热完成")
 
+    def start_cookie_persistence(self) -> None:
+        """启动运行期 Cookie 定时回写。"""
+        if self._session is not None:
+            self._session.start_cookie_persistence()
+
     async def switch_auth(self, auth_file: str | None) -> None:
         """切换账号的 auth 文件并清空模板缓存。"""
         self.clear_templates()

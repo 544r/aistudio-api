@@ -270,7 +270,7 @@ async def handle_attempt_exception(
             return True
         if attempt < 2 and not has_yielded_data:
             if client._session is not None:
-                await client._session._close_internal()
+                await client._session._close_internal(save_cookies=False)
             return True
         if isinstance(exc, BrowserTransportError):
             runtime_state.record(target_model, "errors")

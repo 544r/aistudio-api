@@ -58,6 +58,7 @@ async def lifespan(_app: FastAPI):
         port=runtime_state.browser_port,
     )
     runtime_state.client = client
+    client.start_cookie_persistence()
 
     # 初始化账号管理服务
     account_store = AccountStore()

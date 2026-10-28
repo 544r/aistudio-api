@@ -62,6 +62,39 @@ DEFAULT_BOOTSTRAP_TEMPLATE: dict[str, object] = {
     "body": '["models/gemini-3.7-flash"]',
 }
 
+# 运行期间浏览器会持续轮换 Google 会话 Cookie；定期把最新值回写 auth.json，
+# 避免重启时注入一份已经过期的快照。
+COOKIE_SAVE_INTERVAL_S = 60.0
+COOKIE_SAVE_TIMEOUT_S = 3.0
+
+
+def _has_auth_cookies(cookies: list[dict[str, object]]) -> bool:
+    """Check whether the cookie jar still contains a usable Google login."""
+    names = {
+        str(cookie.get("name") or "") for cookie in cookies if isinstance(cookie, dict)
+    }
+    has_sapisid = "SAPISID" in names or "__Secure-3PAPISID" in names
+    has_psid = bool(names & {"SID", "__Secure-1PSID", "__Secure-3PSID"})
+    return has_sapisid and has_psid
+
+
+def _cookie_fingerprint(cookies: list[dict[str, object]]) -> str:
+    """Stable fingerprint used to skip unchanged periodic writes."""
+    canonical = sorted(
+        (
+            str(cookie.get("name") or ""),
+            str(cookie.get("value") or ""),
+            str(cookie.get("domain") or ""),
+            str(cookie.get("path") or ""),
+            str(cookie.get("expires", "")),
+        )
+        for cookie in cookies
+        if isinstance(cookie, dict)
+    )
+    return sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
 
 class BrowserSession:
     """Coordinates browser lifecycle, readiness gate, and blue-green tab transitions."""
@@ -78,6 +111,9 @@ class BrowserSession:
         self._gate = SessionReadinessGate()
         self._transition_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
+        self._cookie_save_lock = asyncio.Lock()
+        self._cookie_save_task: asyncio.Task[None] | None = None
+        self._cookie_fingerprints: dict[str, str] = {}
         self._transport = XHRStreamTransport()
         self._retiring_contexts: list[SessionContext] = []
         self._background_tasks: set[asyncio.Task[object]] = set()
@@ -163,7 +199,7 @@ class BrowserSession:
             if await page.is_alive(timeout_s=1.0):
                 return page
             log.warning("浏览器页面无响应，重新连接...")
-        await self._close_internal()
+        await self._close_internal(save_cookies=False)
         res = await self._ensure_browser_cdp()
         return res or (await self.ensure_ready()).page
 
@@ -192,8 +228,24 @@ class BrowserSession:
             ):
                 return self._gate.active_context
 
-            self._gate.set_preparing()
             old_context = self._gate.active_context
+            if (
+                old_context is not None
+                and old_context.auth_file
+                and not old_context.page.is_closed()
+            ):
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        self._save_cookies(
+                            page=old_context.page,
+                            auth_file=old_context.auth_file,
+                            force=True,
+                            quiet=True,
+                        ),
+                        timeout=COOKIE_SAVE_TIMEOUT_S,
+                    )
+
+            self._gate.set_preparing()
             target_auth_user = get_auth_user_from_meta(auth_file)
             target_tier = get_tier_from_meta(auth_file)
             self._auth_file = auth_file
@@ -203,7 +255,7 @@ class BrowserSession:
             try:
                 # Real browser mode
                 if self._proc is None or not self._proc.is_alive():
-                    await self._close_internal()
+                    await self._close_internal(save_cookies=False)
                     await self._ensure_browser_cdp()
 
                 assert self._cdp_client is not None
@@ -283,6 +335,23 @@ class BrowserSession:
                 break
             if context.page.is_closed():
                 break
+
+        active = self._gate.active_context
+        if (
+            context.auth_file
+            and (active is None or active.auth_file != context.auth_file)
+            and not context.page.is_closed()
+        ):
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    self._save_cookies(
+                        page=context.page,
+                        auth_file=context.auth_file,
+                        force=True,
+                        quiet=True,
+                    ),
+                    timeout=COOKIE_SAVE_TIMEOUT_S,
+                )
 
         with suppress(Exception):
             if context in self._retiring_contexts:
@@ -486,17 +555,105 @@ class BrowserSession:
         target = page or (self.active_context.page if self.active_context else None)
         return bool(target and await load_cookies_to_page(target, self._auth_file))
 
+    async def save_active_cookies(self, *, force: bool = True) -> bool:
+        """Persist the active account's current browser cookies to auth.json."""
+        ctx = self._gate.active_context
+        if ctx is None or not self._gate.is_ready():
+            return False
+        return await self._save_cookies(
+            page=ctx.page,
+            auth_file=ctx.auth_file,
+            force=force,
+        )
+
     async def _save_cookies(
         self,
         *,
         auth_file: str | None = None,
         cookies: list[dict[str, object]] | None = None,
+        page: CDPPage | None = None,
+        force: bool = False,
+        quiet: bool = False,
+    ) -> bool:
+        """Write current browser cookies back, skipping unchanged or logged-out jars."""
+        target = page or self.page
+        target_auth = auth_file or self._auth_file
+        if target is None or target.is_closed() or not target_auth:
+            return False
+        auth_path = Path(target_auth)
+        if not auth_path.parent.is_dir():
+            return False
+        async with self._cookie_save_lock:
+            try:
+                current_cookies = cookies
+                if current_cookies is None:
+                    current_cookies = await target.get_cookies()
+                if not current_cookies or not _has_auth_cookies(current_cookies):
+                    return False
+                fingerprint = _cookie_fingerprint(current_cookies)
+                key = str(auth_path)
+                if not force and self._cookie_fingerprints.get(key) == fingerprint:
+                    return False
+                saved = await save_browser_cookies(
+                    target,
+                    auth_file=key,
+                    cookies=current_cookies,
+                    quiet=quiet,
+                )
+                if saved:
+                    self._cookie_fingerprints[key] = fingerprint
+                return saved
+            except Exception as e:
+                log.debug("自动保存 Cookie 失败: %s", e)
+                return False
+
+    def start_cookie_persistence(
+        self, interval_s: float = COOKIE_SAVE_INTERVAL_S
     ) -> None:
-        target = self.page
-        if target is not None:
-            await save_browser_cookies(
-                target, auth_file=auth_file or self._auth_file, cookies=cookies
-            )
+        """Start periodic cookie writeback for the active account."""
+        if interval_s <= 0:
+            return
+        if self._cookie_save_task is not None and not self._cookie_save_task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._cookie_save_task = asyncio.create_task(
+            self._cookie_persistence_loop(interval_s),
+            name="cookie_persistence",
+        )
+
+    async def _cookie_persistence_loop(self, interval_s: float) -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+                ctx = self._gate.active_context
+                if ctx is None or not self._gate.is_ready():
+                    continue
+                if not ctx.auth_file or ctx.page.is_closed():
+                    continue
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        self._save_cookies(
+                            page=ctx.page,
+                            auth_file=ctx.auth_file,
+                            quiet=True,
+                        ),
+                        timeout=COOKIE_SAVE_TIMEOUT_S,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.debug("Cookie 定时回写异常: %s", e)
+
+    async def _stop_cookie_persistence(self) -> None:
+        task = self._cookie_save_task
+        self._cookie_save_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     async def _ensure_browser_cdp(self) -> CDPPage | None:
         if self._proc is not None and self._proc.is_alive() and self._cdp_client:
@@ -517,10 +674,29 @@ class BrowserSession:
         return await self._cdp_client.connect_page(block_assets=True)
 
     async def close(self) -> None:
+        await self._stop_cookie_persistence()
         async with self._transition_lock:
             await self._close_internal()
 
-    async def _close_internal(self) -> None:
+    async def _close_internal(self, *, save_cookies: bool = True) -> None:
+        ctx = self._gate.active_context
+        if (
+            save_cookies
+            and ctx is not None
+            and ctx.auth_file
+            and self._proc is not None
+            and self._proc.is_alive()
+            and not ctx.page.is_closed()
+        ):
+            with suppress(Exception):
+                await asyncio.wait_for(
+                    self._save_cookies(
+                        page=ctx.page,
+                        auth_file=ctx.auth_file,
+                        force=True,
+                    ),
+                    timeout=COOKIE_SAVE_TIMEOUT_S,
+                )
         self._gate.reset()
         self._retiring_contexts.clear()
 

@@ -367,18 +367,20 @@ async def save_browser_cookies(
     page: CDPPage,
     auth_file: str | None,
     cookies: list[dict[str, object]] | None = None,
-) -> None:
+    *,
+    quiet: bool = False,
+) -> bool:
     """Save browser cookies back to auth_file JSON atomically."""
     if not auth_file:
-        return
+        return False
     try:
         current_cookies = cookies
         if current_cookies is None:
             if page.is_closed():
-                return
+                return False
             current_cookies = await page.get_cookies()
         if not current_cookies:
-            return
+            return False
         auth_path = Path(auth_file)
         origins = []
         if auth_path.exists():
@@ -386,9 +388,14 @@ async def save_browser_cookies(
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
         atomic_write_json(auth_path, {"cookies": current_cookies, "origins": origins})
-        log.info("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
+        if quiet:
+            log.debug("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
+        else:
+            log.info("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
+        return True
     except Exception as e:
         log.debug("保存 Cookie 失败: %s", e)
+        return False
 
 
 async def bootstrap_google_session(page: CDPPage) -> None:
