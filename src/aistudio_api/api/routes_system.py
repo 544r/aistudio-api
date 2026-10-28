@@ -7,7 +7,8 @@ import time
 from typing import TYPE_CHECKING
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from aistudio_api.api.dependencies import get_runtime_state
@@ -417,6 +418,64 @@ async def update_logging_config(req: LoggingConfigRequest) -> dict[str, object]:
         "dump_to_file": is_dump_to_file_enabled(),
         "dump_dir": str(get_dump_dir()),
     }
+
+
+# ========== 运行日志与报文转储查看 ==========
+
+
+@protected_router.get("/logs")
+async def read_recent_logs(after: int = 0, limit: int = 200) -> dict[str, object]:
+    """返回内存中的最近运行日志，供控制台增量轮询。"""
+    from aistudio_api.infrastructure.utils.logger import get_recent_logs
+
+    entries = get_recent_logs(after=max(0, after), limit=max(1, limit))
+    last_seq = entries[-1]["seq"] if entries else max(0, after)
+    return {"entries": entries, "last_seq": last_seq}
+
+
+@protected_router.get("/logs/dumps")
+async def list_request_dumps(limit: int = 50) -> dict[str, object]:
+    """列出已落盘的请求报文文件。"""
+    from aistudio_api.infrastructure.utils.logger import get_dump_dir, list_dump_files
+
+    return {"dir": str(get_dump_dir()), "files": list_dump_files(limit=limit)}
+
+
+@protected_router.get("/logs/dumps/{name}")
+async def read_request_dump(name: str) -> Response:
+    """读取单个请求报文转储文件。"""
+    from aistudio_api.infrastructure.utils.logger import resolve_dump_file
+
+    path = resolve_dump_file(name)
+    if path is None:
+        raise HTTPException(404, detail="转储文件不存在")
+    return FileResponse(path, media_type="application/json")
+
+
+@protected_router.delete("/logs")
+async def clear_runtime_logs() -> dict[str, object]:
+    """清空内存中的运行日志缓冲。"""
+    from aistudio_api.infrastructure.utils.logger import clear_recent_logs
+
+    return {"ok": True, "cleared": clear_recent_logs()}
+
+
+@protected_router.delete("/logs/dumps")
+async def clear_request_dumps() -> dict[str, object]:
+    """删除转储目录中的全部 JSON 报文文件。"""
+    from aistudio_api.infrastructure.utils.logger import clear_dump_files
+
+    return {"ok": True, "deleted": clear_dump_files()}
+
+
+@protected_router.delete("/logs/dumps/{name}")
+async def delete_request_dump(name: str) -> dict[str, object]:
+    """删除单个请求报文转储文件。"""
+    from aistudio_api.infrastructure.utils.logger import delete_dump_file
+
+    if not delete_dump_file(name):
+        raise HTTPException(404, detail="转储文件不存在")
+    return {"ok": True}
 
 
 # ========== API Key 备注与密钥管理 ==========

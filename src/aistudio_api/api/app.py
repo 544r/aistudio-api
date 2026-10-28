@@ -258,7 +258,11 @@ async def logging_and_dump_middleware(request, call_next):
     path = request.url.path
 
     is_static = path.startswith(("/static", "/assets")) or path in ("/favicon.ico",)
-    dump_enabled = is_dump_requests_enabled() and not is_static
+    # 日志查看与健康检查轮询不写入访问日志/转储，避免把真正的业务日志挤掉
+    is_silent_poll = (
+        path == "/logs" or path.startswith("/logs/") or path == "/health"
+    )
+    dump_enabled = is_dump_requests_enabled() and not is_static and not is_silent_poll
 
     req_id = ""
     body_text = None
@@ -343,7 +347,7 @@ async def logging_and_dump_middleware(request, call_next):
             response_text=resp_text,
             is_stream=is_event_stream,
         )
-    elif not is_static:
+    elif not is_static and not is_silent_poll:
         logger.info(
             "HTTP %s %s -> %d (%.1fms)",
             request.method,

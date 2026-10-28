@@ -12,9 +12,12 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypedDict
 
 _UNIFIED_LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
 _UNIFIED_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -28,6 +31,10 @@ _COLORS = {
     "CRITICAL": "\033[1;31m",  # Bold Red
 }
 _RESET = "\033[0m"
+
+# 内存日志缓冲：供 Web 控制台查看最近日志，无需登录服务器
+LOG_BUFFER_CAPACITY = 500
+LOG_MESSAGE_LIMIT = 8000
 
 
 class UnifiedFormatter(logging.Formatter):
@@ -53,7 +60,74 @@ class UnifiedFormatter(logging.Formatter):
             record.levelname = orig_levelname
 
 
+class LogEntry(TypedDict):
+    seq: int
+    time: str
+    level: str
+    logger: str
+    message: str
+
+
+class BufferLogHandler(logging.Handler):
+    """把最近的日志记录保存在内存环形缓冲区中，供 Web 控制台读取。
+
+    只保留日志文本，不持有 LogRecord 对象，避免长期运行时的引用堆积。
+    """
+
+    def __init__(self, capacity: int = LOG_BUFFER_CAPACITY) -> None:
+        super().__init__()
+        self._records: deque[LogEntry] = deque(maxlen=capacity)
+        self._lock = threading.Lock()
+        self._seq = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message = (
+                    f"{message}\n{logging.Formatter().formatException(record.exc_info)}"
+                )
+            if len(message) > LOG_MESSAGE_LIMIT:
+                message = (
+                    message[:LOG_MESSAGE_LIMIT]
+                    + f"\n... [已截断，原有 {len(message)} 字符]"
+                )
+            time_text = datetime.fromtimestamp(record.created).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            with self._lock:
+                self._seq += 1
+                self._records.append(
+                    {
+                        "seq": self._seq,
+                        "time": time_text,
+                        "level": record.levelname,
+                        "logger": record.name,
+                        "message": message,
+                    }
+                )
+        except Exception:
+            self.handleError(record)
+
+    def snapshot(self, after: int = 0, limit: int = 200) -> list[LogEntry]:
+        limit = max(1, min(limit, 1000))
+        with self._lock:
+            records = list(self._records)
+        if after > 0:
+            records = [record for record in records if record["seq"] > after]
+            return records[:limit]
+        return records[-limit:]
+
+    def clear(self) -> int:
+        """清空已缓存的记录；序号继续递增，客户端游标不会错乱。"""
+        with self._lock:
+            count = len(self._records)
+            self._records.clear()
+            return count
+
+
 _root_handler: logging.Handler | None = None
+_buffer_handler: BufferLogHandler | None = None
 _current_level: str = "INFO"
 _dump_requests_override: bool | None = None
 _dump_to_file_override: bool | None = None
@@ -157,6 +231,67 @@ def set_dump_dir(dump_dir: str | Path | None) -> None:
         settings.dump_dir = str(dump_dir)
 
 
+def list_dump_files(limit: int = 50) -> list[dict[str, object]]:
+    """列出转储目录中的报文文件，按修改时间倒序。"""
+    folder = get_dump_dir()
+    entries: list[tuple[float, dict[str, object]]] = []
+    for path in folder.glob("*.json"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append(
+            (
+                stat.st_mtime,
+                {
+                    "name": path.name,
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                },
+            )
+        )
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in entries[: max(1, min(limit, 200))]]
+
+
+def resolve_dump_file(name: str) -> Path | None:
+    """校验并解析转储文件名，拒绝目录穿越与非 JSON 文件。"""
+    if not name.endswith(".json") or Path(name).name != name:
+        return None
+    folder = get_dump_dir().resolve()
+    path = (folder / name).resolve()
+    if path.parent != folder or not path.is_file():
+        return None
+    return path
+
+
+def clear_dump_files() -> int:
+    """删除转储目录中的全部 JSON 报文文件，返回删除数量。"""
+    folder = get_dump_dir()
+    removed = 0
+    for path in folder.glob("*.json"):
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def delete_dump_file(name: str) -> bool:
+    """删除单个转储文件；文件名非法或不存在时返回 False。"""
+    path = resolve_dump_file(name)
+    if path is None:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def is_debug_env_active() -> bool:
     """检查是否通过 DEBUG / AISTUDIO_DEBUG 环境变量显式启用了请求转储。
 
@@ -249,7 +384,7 @@ def set_log_level(level: str | int) -> None:
 
 def setup_logging(level: str | int = "INFO") -> None:
     """初始化全局日志系统并统一所有子系统的格式与输出。"""
-    global _root_handler
+    global _root_handler, _buffer_handler
     formatter = UnifiedFormatter()
 
     if _root_handler is None:
@@ -261,12 +396,20 @@ def setup_logging(level: str | int = "INFO") -> None:
     else:
         _root_handler.setFormatter(formatter)
 
-    # 将 uvicorn 的日志器也接入统一格式
+    if _buffer_handler is None:
+        _buffer_handler = BufferLogHandler()
+    root = logging.getLogger()
+    if _buffer_handler not in root.handlers:
+        root.addHandler(_buffer_handler)
+
+    # 将 uvicorn 的日志器也接入统一格式；访问日志不进内存缓冲，避免轮询日志接口本身产生噪声
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         lgr = logging.getLogger(logger_name)
         lgr.handlers.clear()
         if _root_handler not in lgr.handlers:
             lgr.addHandler(_root_handler)
+        if logger_name != "uvicorn.access" and _buffer_handler not in lgr.handlers:
+            lgr.addHandler(_buffer_handler)
         lgr.propagate = False
 
     set_log_level(level)
@@ -279,6 +422,23 @@ def get_logger(name: str = "aistudio") -> logging.Logger:
     else:
         full_name = name
     return logging.getLogger(full_name)
+
+
+def get_recent_logs(after: int = 0, limit: int = 200) -> list[LogEntry]:
+    """获取内存缓冲中的日志记录。
+
+    after 为客户端已收到的最大序号，用于增量轮询；传 0 时返回最近 limit 条。
+    """
+    if _buffer_handler is None:
+        return []
+    return _buffer_handler.snapshot(after=after, limit=limit)
+
+
+def clear_recent_logs() -> int:
+    """清空内存日志缓冲，返回被清空的记录数量。"""
+    if _buffer_handler is None:
+        return 0
+    return _buffer_handler.clear()
 
 
 dump_logger = get_logger("dump")

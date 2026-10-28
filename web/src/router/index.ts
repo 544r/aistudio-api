@@ -3,6 +3,7 @@ import { useAuthStore } from '@/stores/auth.ts'
 const LoginView = () => import('@/views/LoginView.vue')
 const DashboardView = () => import('@/views/DashboardView.vue')
 const AccountsView = () => import('@/views/AccountsView.vue')
+const LogsView = () => import('@/views/LogsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
 
 const routes: RouteRecordRaw[] = [
@@ -23,6 +24,12 @@ const routes: RouteRecordRaw[] = [
     name: 'accounts',
     component: AccountsView,
     meta: { title: '账号管理' },
+  },
+  {
+    path: '/logs',
+    name: 'logs',
+    component: LogsView,
+    meta: { title: '运行日志' },
   },
   {
     path: '/settings',

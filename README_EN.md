@@ -51,6 +51,7 @@
 | **Runtime State Persistence** | Model usage statistics (`stats.json`) and account 429 cooldown & quota status (`rotator_state.json`) are automatically persisted to disk across restarts |
 | **Cookie Writeback** | Every 60 seconds the active browser's latest cookies are written back to the account's `auth.json`; also saved before account switches and on shutdown to avoid restarting with a stale snapshot |
 | **Instant Password Change** | The console's "Change Password" action verifies the current password and takes effect immediately without restarting; the new password is stored as a hash in `data/web_auth.json` and persists with the data volume |
+| **Web Log Console** | New "Logs" page streams the latest 500 server log entries and lets you browse persisted request dumps; server logs and dump files can be cleared with one click, without logging into the server to run `docker logs` |
 | **Downstream Parameter Fault Tolerance** | `drop_unsupported_params` automatically drops unsupported safety categories (e.g. `HARM_CATEGORY_CIVIC_INTEGRITY`) and tools to prevent 400 errors |
 | **Multi-Account Probing** | Extracts and verifies sub-accounts (`u/0`, `u/1`...) automatically when importing a multi-session Cookie |
 | **Built-in Tools** | Supports official tools such as Google Search, Google Maps, and Code Execution sandbox |
@@ -385,6 +386,7 @@ The service includes a built-in static Web Console served at `http://localhost:8
 - **Dashboard**: Real-time view of service health, per-model request stats, success rates, and rate-limit cooldown status.
 - **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits.
 - **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
+- **Logs**: Live view of the latest 500 server log entries with pause, refresh, and one-click clear; lists, opens, deletes, or clears all request-dump JSON files under `dumps/`. Health checks and the log endpoints' own polling are excluded to keep the view readable.
 - **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`. After logging in, use "Change Password" in the top bar to verify the current password and update it instantly without restarting. The new password is stored as a hash in `data/web_auth.json` and persists with the `data` volume; delete that file and restart to fall back to the environment password.
 
 ---

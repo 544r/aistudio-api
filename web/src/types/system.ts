@@ -45,3 +45,27 @@ export interface CreateApiKeyRequest {
 export interface UpdateApiKeyRequest {
   name: string
 }
+
+export interface LogEntry {
+  seq: number
+  time: string
+  level: string
+  logger: string
+  message: string
+}
+
+export interface LogsResponse {
+  entries: LogEntry[]
+  last_seq: number
+}
+
+export interface DumpFileInfo {
+  name: string
+  size: number
+  modified: string
+}
+
+export interface DumpFilesResponse {
+  dir: string
+  files: DumpFileInfo[]
+}

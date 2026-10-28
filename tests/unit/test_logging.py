@@ -307,3 +307,181 @@ def test_dump_request_to_file_by_req_id(tmp_path):
     finally:
         set_dump_to_file(None)
         set_dump_dir(None)
+
+
+def test_buffer_log_handler_snapshot_and_cursor():
+    """内存日志缓冲按容量滚动，并支持 after 游标增量读取。"""
+    from aistudio_api.infrastructure.utils.logger import BufferLogHandler
+
+    logger = logging.getLogger("aistudio.tests.buffer")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    handler = BufferLogHandler(capacity=3)
+    logger.addHandler(handler)
+
+    try:
+        for i in range(4):
+            logger.info("日志-%d", i)
+
+        entries = handler.snapshot()
+        assert [entry["message"] for entry in entries] == [
+            "日志-1",
+            "日志-2",
+            "日志-3",
+        ]
+        last_seq = entries[-1]["seq"]
+
+        logger.info("日志-4")
+        tail = handler.snapshot(after=last_seq)
+        assert [entry["message"] for entry in tail] == ["日志-4"]
+    finally:
+        logger.removeHandler(handler)
+
+    assert handler.snapshot(limit=1)[0]["message"] == "日志-4"
+
+
+def test_buffer_log_handler_truncates_long_messages():
+    """超长的转储日志会被截断，避免内存缓冲被单条记录撑爆。"""
+    from aistudio_api.infrastructure.utils.logger import BufferLogHandler
+
+    handler = BufferLogHandler(capacity=2)
+    record = logging.LogRecord(
+        name="aistudio.tests.long",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="x" * 9000,
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(record)
+
+    entry = handler.snapshot()[0]
+    message = str(entry["message"])
+    assert "已截断" in message
+    assert len(message) < 9000
+
+
+@pytest.mark.asyncio
+async def test_logs_endpoint_returns_recent_entries():
+    """Web 控制台可通过 /logs 读取最近日志并增量拉取。"""
+    import uuid
+
+    setup_logging("INFO")
+    marker = f"web-log-{uuid.uuid4().hex}"
+    get_logger("tests.weblog").info(marker)
+
+    async with _client() as client:
+        resp = await client.get("/logs?limit=200")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["entries"], list)
+        assert data["last_seq"] >= 1
+        assert any(marker in str(entry["message"]) for entry in data["entries"])
+
+        resp2 = await client.get(f"/logs?after={data['last_seq']}")
+        assert resp2.status_code == 200
+        tail = resp2.json()["entries"]
+        assert all(entry["seq"] > data["last_seq"] for entry in tail)
+        assert not any(marker in str(entry["message"]) for entry in tail)
+
+
+@pytest.mark.asyncio
+async def test_dump_file_endpoints(tmp_path):
+    """Web 控制台可列出并读取已落盘的报文文件，非 JSON 与越界路径被拒绝。"""
+    from aistudio_api.infrastructure.utils.logger import set_dump_dir
+
+    dump_dir = tmp_path / "dumps"
+    dump_dir.mkdir()
+    (dump_dir / "req_demo.json").write_text('{"req_id": "req_demo"}', encoding="utf-8")
+    (dump_dir / "notes.txt").write_text("x", encoding="utf-8")
+
+    set_dump_dir(dump_dir)
+    try:
+        async with _client() as client:
+            resp = await client.get("/logs/dumps")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["dir"] == str(dump_dir)
+            names = [item["name"] for item in data["files"]]
+            assert names == ["req_demo.json"]
+
+            resp = await client.get("/logs/dumps/req_demo.json")
+            assert resp.status_code == 200
+            assert resp.json()["req_id"] == "req_demo"
+
+            assert (await client.get("/logs/dumps/missing.json")).status_code == 404
+            assert (await client.get("/logs/dumps/notes.txt")).status_code == 404
+    finally:
+        set_dump_dir(None)
+
+
+def test_resolve_dump_file_rejects_traversal(tmp_path):
+    """转储文件名不允许包含目录成分。"""
+    from aistudio_api.infrastructure.utils.logger import (
+        resolve_dump_file,
+        set_dump_dir,
+    )
+
+    dump_dir = tmp_path / "dumps"
+    dump_dir.mkdir()
+    (dump_dir / "ok.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "secret.json").write_text("{}", encoding="utf-8")
+
+    set_dump_dir(dump_dir)
+    try:
+        assert resolve_dump_file("ok.json") == dump_dir / "ok.json"
+        assert resolve_dump_file("../secret.json") is None
+        assert resolve_dump_file("sub/evil.json") is None
+        assert resolve_dump_file("ok.txt") is None
+    finally:
+        set_dump_dir(None)
+
+
+@pytest.mark.asyncio
+async def test_clear_logs_endpoint():
+    """DELETE /logs 清空服务端内存缓冲，新日志仍可继续采集。"""
+    setup_logging("INFO")
+    get_logger("tests.clear").warning("clear-me-please")
+
+    async with _client() as client:
+        resp = await client.delete("/logs")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert resp.json()["cleared"] >= 1
+
+        get_logger("tests.clear").info("after-clear")
+        resp2 = await client.get("/logs?limit=100")
+        messages = [str(entry["message"]) for entry in resp2.json()["entries"]]
+        assert "after-clear" in messages
+        assert not any("clear-me-please" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_delete_dump_files_endpoints(tmp_path):
+    """DELETE /logs/dumps 删除单个或全部 JSON 转储，且保留非 JSON 文件。"""
+    from aistudio_api.infrastructure.utils.logger import set_dump_dir
+
+    dump_dir = tmp_path / "dumps"
+    dump_dir.mkdir()
+    (dump_dir / "req_one.json").write_text("{}", encoding="utf-8")
+    (dump_dir / "req_two.json").write_text("{}", encoding="utf-8")
+    (dump_dir / "notes.txt").write_text("keep me", encoding="utf-8")
+
+    set_dump_dir(dump_dir)
+    try:
+        async with _client() as client:
+            resp = await client.delete("/logs/dumps/req_one.json")
+            assert resp.status_code == 200
+            assert not (dump_dir / "req_one.json").exists()
+
+            assert (await client.delete("/logs/dumps/req_one.json")).status_code == 404
+            assert (await client.delete("/logs/dumps/notes.txt")).status_code == 404
+
+            resp = await client.delete("/logs/dumps")
+            assert resp.status_code == 200
+            assert resp.json()["deleted"] == 1
+            assert not (dump_dir / "req_two.json").exists()
+            assert (dump_dir / "notes.txt").exists()
+    finally:
+        set_dump_dir(None)

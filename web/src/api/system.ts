@@ -10,6 +10,8 @@ import type {
   UpdateLoggingConfigRequest,
   UpdateLoggingConfigResponse,
   HealthCheckResponse,
+  LogsResponse,
+  DumpFilesResponse,
 } from '@/types'
 
 
@@ -60,6 +62,36 @@ export const systemApi = {
     return request<UpdateLoggingConfigResponse>('/config/logging', {
       method: 'PUT',
       body: JSON.stringify(req),
+    })
+  },
+
+  getLogs(after = 0, limit = 200): Promise<LogsResponse> {
+    return request<LogsResponse>(`/logs?after=${after}&limit=${limit}`)
+  },
+
+  listDumpFiles(limit = 50): Promise<DumpFilesResponse> {
+    return request<DumpFilesResponse>(`/logs/dumps?limit=${limit}`)
+  },
+
+  getDumpFile(name: string): Promise<unknown> {
+    return request<unknown>(`/logs/dumps/${encodeURIComponent(name)}`)
+  },
+
+  clearLogs(): Promise<{ ok: boolean; cleared: number }> {
+    return request<{ ok: boolean; cleared: number }>('/logs', {
+      method: 'DELETE',
+    })
+  },
+
+  clearDumpFiles(): Promise<{ ok: boolean; deleted: number }> {
+    return request<{ ok: boolean; deleted: number }>('/logs/dumps', {
+      method: 'DELETE',
+    })
+  },
+
+  deleteDumpFile(name: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/logs/dumps/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
     })
   },
 
