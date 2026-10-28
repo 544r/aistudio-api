@@ -1,0 +1,49 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build And Publish Source Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build source package
+        run: |
+          mkdir -p dist
+          git archive \
+            --format=tar.gz \
+            --prefix=aistudio-api-${GITHUB_REF_NAME}/ \
+            -o dist/aistudio-api-${GITHUB_REF_NAME}.tar.gz \
+            HEAD
+          cd dist
+          sha256sum aistudio-api-${GITHUB_REF_NAME}.tar.gz > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/aistudio-api-${{ github.ref_name }}.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ## 部署到 Linux 服务器
+
+            ```bash
+            tar -xzf aistudio-api-${{ github.ref_name }}.tar.gz
+            cd aistudio-api-${{ github.ref_name }}
+            uv sync
+            bash scripts/setup-browser.sh   # 首次运行，安装受控 Chromium
+            uv run python3 main.py server --port 8080
+            ```
+
+            要求 Python 3.11+ 与 Linux 下 CloakBrowser 的运行库；完整依赖见 README。
+            管理页面：`http://<服务器>:8080`。

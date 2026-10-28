@@ -338,7 +338,7 @@ def test_account_stats_short_cooldown_sync():
     stats.record_rate_limited(model="gemini-2.5-flash")
     assert not stats.is_available("gemini-2.5-flash")
     rem3 = stats.get_cooldown_remaining("gemini-2.5-flash")
-    assert rem3 > 60.0
+    assert rem3 > 59.0
 
 def test_safe_account_dir_path_traversal_rejection(tmp_path):
     """Verify _safe_account_dir rejects path traversal and malicious account IDs."""

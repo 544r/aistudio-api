@@ -28,8 +28,10 @@ from aistudio_api.infrastructure.utils.logger import (
 
 from .dependencies import require_api_key, require_web_auth
 from .routes_accounts import router as accounts_router
+from .routes_anthropic import router as anthropic_router
 from .routes_gemini import router as gemini_router
 from .routes_models import router as models_router
+from .routes_openai import router as openai_router
 from .routes_system import (
     protected_router as system_protected_router,
     public_router as system_public_router,
@@ -156,11 +158,64 @@ app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
+app.include_router(openai_router, dependencies=[Depends(require_api_key)])
+app.include_router(anthropic_router, dependencies=[Depends(require_api_key)])
+
+
+def _openai_error_type(status: int) -> str:
+    if status == 400:
+        return "invalid_request_error"
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 404:
+        return "not_found_error"
+    if status == 429:
+        return "rate_limit_error"
+    return "api_error"
+
+
+def _anthropic_error_type(status: int) -> str:
+    return _openai_error_type(status)
+
+
+def _compat_error_response(
+    request: Request, status: int, message: str
+) -> JSONResponse | None:
+    path = request.url.path
+    if path.startswith("/v1/messages"):
+        return JSONResponse(
+            status_code=status,
+            content={
+                "type": "error",
+                "error": {
+                    "type": _anthropic_error_type(status),
+                    "message": message,
+                },
+            },
+        )
+    if path.startswith(("/v1/chat/completions", "/v1/models")):
+        return JSONResponse(
+            status_code=status,
+            content={
+                "error": {
+                    "message": message,
+                    "type": _openai_error_type(status),
+                    "param": None,
+                    "code": status,
+                }
+            },
+        )
+    return None
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     code, msg, status_str = classify_gemini_error_payload(exc)
+    compat = _compat_error_response(request, code, msg)
+    if compat is not None:
+        return compat
     return JSONResponse(
         status_code=code,
         content={
@@ -176,9 +231,12 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
-    _request: Request, exc: RequestValidationError
+    request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     code, msg, status_str = 400, str(exc), "INVALID_ARGUMENT"
+    compat = _compat_error_response(request, code, msg)
+    if compat is not None:
+        return compat
     return JSONResponse(
         status_code=code,
         content={

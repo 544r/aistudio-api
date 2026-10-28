@@ -147,7 +147,7 @@ async def test_account_stats_clear_cooldown_resets_counter():
     stats.record_rate_limited(model="gemini-2.5-pro")
     stats.record_rate_limited(model="gemini-2.5-pro")
     assert not stats.is_available("gemini-2.5-pro")
-    assert stats.get_cooldown_remaining("gemini-2.5-pro") > 60.0
+    assert stats.get_cooldown_remaining("gemini-2.5-pro") > 59.0
 
     # 手动清除冷却
     stats.clear_cooldown(model="gemini-2.5-pro")

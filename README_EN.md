@@ -45,6 +45,7 @@
 | Feature | Description |
 |---|---|
 | **Gemini API Compatibility** | Supports `/v1beta/...` endpoints including Thinking, multimodal inputs, function calling, and image generation |
+| **OpenAI / Anthropic Compatibility** | Adds `/v1/chat/completions`, `/v1/messages`, `/v1/models`, and `/v1/messages/count_tokens` with streaming, tool calling, thinking, and image inputs; reuses the native Gemini pipeline instead of duplicating upstream logic (Beta) |
 | **Dynamic Model Discovery** | Automatically synchronizes and discovers available models from upstream Google AI Studio |
 | **Multi-Account Rotation** | Manages multiple accounts with automatic failover, tracks 429 rate limits per model independently, and resets quotas at midnight Pacific Time |
 | **Runtime State Persistence** | Model usage statistics (`stats.json`) and account 429 cooldown & quota status (`rotator_state.json`) are automatically persisted to disk across restarts |

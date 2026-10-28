@@ -543,7 +543,10 @@ def _normalize_gemini_safety_settings(
 
 
 def normalize_gemini_request(
-    req: GeminiGenerateContentRequest, requested_model: str
+    req: GeminiGenerateContentRequest,
+    requested_model: str,
+    *,
+    use_default_tools: bool = True,
 ) -> NormalizedGeminiRequest:
     if not req.contents:
         raise ValueError("contents is required")
@@ -719,7 +722,7 @@ def normalize_gemini_request(
     # 仅当客户端未传 tools 时注入 config.yaml 的 default_tools。
     # 若客户端显式声明了 tools（如自定义函数声明），绝不自动混入 Google Search 等内置工具，
     # 避免触发 Google MakerSuite "Please enable tool_config.include_server_side_tool_invocations" 400 报错。
-    if req.tools is None and model_defaults.default_tools:
+    if use_default_tools and req.tools is None and model_defaults.default_tools:
         default_tool_names = _filter_default_tools_for_model(
             model_defaults.default_tools,
             is_image_model=model_defaults.is_image_model,

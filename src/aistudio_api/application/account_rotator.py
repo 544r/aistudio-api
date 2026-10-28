@@ -412,7 +412,7 @@ class AccountStats:
             all_keys: set[str] = set()
             for source in (old_model_reqs, old_model_cds, old_model_rates, old_model_drips):
                 if isinstance(source, dict):
-                    all_keys.update(str(k) for k in source.keys())
+                    all_keys.update(str(k) for k in source)
             for m_k in all_keys:
                 daily_models[str(m_k)] = AccountModelDailyStats(
                     requests=_as_int(old_model_reqs.get(m_k)) if isinstance(old_model_reqs, dict) else 0,

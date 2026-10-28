@@ -18,7 +18,7 @@
 
 `aistudio-api` 是 Google AI Studio 反向代理网关，提供原生 **Gemini API 兼容接口**（`/v1beta/...`）。
 
-- **原生 Gemini 协议专一性**：服务于 Gemini 官方 API 规范（包含 thinking、multimodal、image-generation、function calling 等），不引入额外的跨厂商协议转译层。
+- **原生 Gemini 协议优先**：内部管线、wire 编解码与上游交互始终使用 Gemini 语义，`/v1beta/...` 是原生接口。为兼容 OpenAI 与 Anthropic 客户端，`/v1/chat/completions`、`/v1/messages` 等端点只做请求/响应形状转换，复用同一 Gemini 管线，不复制上游逻辑。
 - **轻量 CDP 驱动**：使用纯 Python 异步 WebSocket 直连 Chrome DevTools Protocol（CDP），不依赖 Node.js、Playwright 或 Selenium。
 - **浏览器内 XHR Replay**：在 MakerSuite 页面上下文中执行携带 `withCredentials = true` 的异步 XHR 请求，天然复用完整的 Cookie 会话、BotGuard 快照与环境指纹。
 - **代码即事实标准（Code as Ground Truth）**：通过全量测试验证的代码是系统的事实标准。当技术规范文档与真实代码逻辑出现分歧时以代码为准，并在重构过程中同步更新文档。

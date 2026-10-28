@@ -32,6 +32,7 @@
 - [配置与环境变量](#配置与环境变量)
 - [API 调用示例](#api-调用示例)
   - [cURL 调用](#curl-调用)
+  - [OpenAI / Anthropic 客户端](#openai--anthropic-客户端)
   - [Python SDK (google-genai)](#python-sdk-google-genai)
   - [工具调用 (Function Calling)](#工具调用-function-calling)
 - [Web 管理控制台](#web-管理控制台)
@@ -45,6 +46,7 @@
 | 功能模块 | 说明 |
 |---|---|
 | **Gemini 协议兼容** | 支持 `/v1beta/...` 接口规范，包括 Thinking 思维链、多模态、Function Calling 工具调用及图片生成 |
+| **OpenAI / Anthropic 兼容** | 提供 `/v1/chat/completions`、`/v1/messages`、`/v1/models` 与 `/v1/messages/count_tokens`，支持流式、工具调用、thinking 与图片输入；复用 Gemini 原生管线，不复制上游实现（Beta） |
 | **动态模型发现** | 自动向上游同步可用模型列表，支持 `gemini-3.7-flash`、`gemini-3.8-flash` 等最新模型 |
 | **多账号自动轮换** | 支持多账号管理与故障自动切换，按模型独立记录 429 配额，每日美西午夜自动重置 |
 | **运行状态持久化** | 模型调用量、Token 消耗统计 (`stats.json`) 以及账号 429 限额与冷却状态 (`rotator_state.json`) 自动落盘，容器/服务重启不丢失状态 |
@@ -285,6 +287,52 @@ curl http://localhost:8080/v1beta/models/gemini-3.7-flash:streamGenerateContent?
   }'
 ```
 </details>
+
+---
+
+### OpenAI / Anthropic 客户端
+
+兼容层把 OpenAI 与 Anthropic 的请求转换成内部 Gemini 请求，因此 `model` 仍填写 Gemini 模型 ID（如 `gemini-3.7-flash`），工具调用、thinking 与图片输入会映射到 Gemini 对应字段。
+
+```bash
+# OpenAI Chat Completions
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.7-flash",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'
+
+# Anthropic Messages
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: your-api-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.7-flash",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+Claude Code 等 Anthropic 客户端：
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_API_KEY=your-api-key
+```
+
+OpenAI 兼容客户端：
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8080/v1
+export OPENAI_API_KEY=your-api-key
+```
+
+> [!NOTE]
+> 工具调用的 Gemini thought signature 会在服务端保留最近 4096 条，并通过 OpenAI 的 `extra_content.google.thought_signature`、Anthropic 的 `redacted_thinking` 回传。客户端即使没有回传签名，服务端也会按调用 ID、函数名和规范化参数恢复，用于多轮工具调用续接；进程重启后内存记录清空，客户端回传的签名仍然有效。
 
 ---
 
