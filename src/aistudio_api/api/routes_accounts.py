@@ -44,6 +44,13 @@ class AccountResponse(BaseModel):
     notes: str = ""
 
 
+class AccountHealthResponse(BaseModel):
+    checked: int
+    valid: int
+    expired: list[str]
+    unknown: list[str]
+
+
 def to_account_response(account: AccountMeta) -> AccountResponse:
     cid = getattr(account, "cookie_id", None) or (
         f"cookie_{account.created_at[:16]}"
@@ -117,6 +124,7 @@ class ApplyPresetResponse(BaseModel):
     enabled_account_ids: list[str]
     disabled_account_ids: list[str]
 
+
 class ImportCookiesRequest(BaseModel):
     cookies: str
     name: str | None = None
@@ -184,6 +192,25 @@ async def get_active_account(
     if account is None:
         raise HTTPException(status_code=404, detail="没有活跃账号")
     return to_account_response(account)
+
+
+@router.post("/health-check", response_model=AccountHealthResponse)
+async def check_accounts_health(
+    account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> AccountHealthResponse:
+    """立即巡检全部账号的 Cookie 登录态。"""
+    from aistudio_api.application.account_health import check_all_accounts
+
+    if runtime_state.rotator is None:
+        raise HTTPException(status_code=503, detail="账号调度器未就绪")
+    summary = await check_all_accounts(account_service, runtime_state.rotator)
+    return AccountHealthResponse(
+        checked=summary["checked"],
+        valid=summary["valid"],
+        expired=summary["expired"],
+        unknown=summary["unknown"],
+    )
 
 
 @router.post("/{account_id}/activate", response_model=AccountResponse)
@@ -594,7 +621,9 @@ async def apply_preset(
         from aistudio_api.application.account_orchestrator import try_switch_account
 
         if not active_acc or not active_acc.enabled or active_acc.id in dis_ids:
-            await try_switch_account(failed_account_id=active_acc.id if active_acc else None)
+            await try_switch_account(
+                failed_account_id=active_acc.id if active_acc else None
+            )
         else:
             await try_switch_account()
 

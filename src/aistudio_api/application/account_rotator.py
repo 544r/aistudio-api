@@ -333,6 +333,19 @@ class AccountStats:
         m_stats.requests += 1
         m_stats.errors += 1
 
+    def set_session_expired(self, expired: bool) -> None:
+        """由主动探活更新登录态，不计入请求/错误统计。"""
+        if expired:
+            now = time.time()
+            self.session_expired = True
+            self.last_session_expired = now
+            self.last_auth_error = now
+            self.auth_cooldown = now + 86400.0
+        elif self.session_expired:
+            self.session_expired = False
+            self.last_session_expired = 0.0
+            self.auth_cooldown = 0.0
+
     def clear_cooldown(self, model: str | None = None) -> None:
         """清除冷却与 429/403/失效锁定。"""
         self.auth_cooldown = 0.0
@@ -410,15 +423,28 @@ class AccountStats:
             or isinstance(old_model_drips, dict)
         ):
             all_keys: set[str] = set()
-            for source in (old_model_reqs, old_model_cds, old_model_rates, old_model_drips):
+            for source in (
+                old_model_reqs,
+                old_model_cds,
+                old_model_rates,
+                old_model_drips,
+            ):
                 if isinstance(source, dict):
                     all_keys.update(str(k) for k in source)
             for m_k in all_keys:
                 daily_models[str(m_k)] = AccountModelDailyStats(
-                    requests=_as_int(old_model_reqs.get(m_k)) if isinstance(old_model_reqs, dict) else 0,
-                    rate_limited=_as_int(old_model_rates.get(m_k)) if isinstance(old_model_rates, dict) else 0,
-                    cooldown_until=_as_float(old_model_cds.get(m_k)) if isinstance(old_model_cds, dict) else 0.0,
-                    drip_mode=bool(old_model_drips.get(m_k)) if isinstance(old_model_drips, dict) else False,
+                    requests=_as_int(old_model_reqs.get(m_k))
+                    if isinstance(old_model_reqs, dict)
+                    else 0,
+                    rate_limited=_as_int(old_model_rates.get(m_k))
+                    if isinstance(old_model_rates, dict)
+                    else 0,
+                    cooldown_until=_as_float(old_model_cds.get(m_k))
+                    if isinstance(old_model_cds, dict)
+                    else 0.0,
+                    drip_mode=bool(old_model_drips.get(m_k))
+                    if isinstance(old_model_drips, dict)
+                    else False,
                 )
         return cls(
             account_id=str(data.get("account_id") or ""),
@@ -657,9 +683,7 @@ class AccountRotator:
                 account.id, AccountStats(account_id=account.id)
             )
             # 4. 登录态与真 429/403 冷却检查
-            if not stats.is_available(
-                model, ignore_auth_cooldown=ignore_auth_cooldown
-            ):
+            if not stats.is_available(model, ignore_auth_cooldown=ignore_auth_cooldown):
                 continue
 
             candidates.append((account, stats))
@@ -873,6 +897,22 @@ class AccountRotator:
         logger.error("账号 %s 登录态失效，已被永久禁用直至重新导入凭据", account_id)
         self.save_state()
 
+    def set_session_expired(self, account_id: str, expired: bool) -> bool:
+        """由主动巡检更新登录态；返回状态是否发生变化。"""
+        if account_id not in self._stats:
+            self._stats[account_id] = AccountStats(account_id=account_id)
+        stats = self._stats[account_id]
+        was_expired = stats.session_expired
+        stats.set_session_expired(expired)
+        changed = was_expired != stats.session_expired
+        if changed:
+            if stats.session_expired:
+                logger.error("账号巡检发现登录态失效，已暂停使用: %s", account_id)
+            else:
+                logger.info("账号巡检确认登录态已恢复: %s", account_id)
+            self.save_state()
+        return changed
+
     def clear_cooldown(self, account_id: str, model: str | None = None) -> None:
         """清除指定账号的 429 锁定。"""
         if account_id not in self._stats:
@@ -906,9 +946,7 @@ class AccountRotator:
         for gid in ghost_ids:
             self._stats.pop(gid, None)
         if ghost_ids:
-            logger.info(
-                "已清理 %d 个幽灵账号残留状态: %s", len(ghost_ids), ghost_ids
-            )
+            logger.info("已清理 %d 个幽灵账号残留状态: %s", len(ghost_ids), ghost_ids)
             self.save_state()
         return ghost_ids
 
@@ -920,4 +958,3 @@ def init_rotator(account_store: AccountStore) -> AccountRotator:
     global _rotator
     _rotator = AccountRotator(account_store)
     return _rotator
-

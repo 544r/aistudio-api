@@ -52,6 +52,7 @@
 | **Cookie Writeback** | Every 60 seconds the active browser's latest cookies are written back to the account's `auth.json`; also saved before account switches and on shutdown to avoid restarting with a stale snapshot |
 | **Instant Password Change** | The console's "Change Password" action verifies the current password and takes effect immediately without restarting; the new password is stored as a hash in `data/web_auth.json` and persists with the data volume |
 | **Web Log Console** | New "Logs" page streams the latest 500 server log entries and lets you browse persisted request dumps; server logs and dump files can be cleared with one click, without logging into the server to run `docker logs` |
+| **Account Health & Keepalive** | Proactively checks account cookies every 10 minutes; a 401 immediately marks the account expired and highlights it in the console. Every 30 minutes an idle AI Studio reload rotates cookies to reduce imported-session expiry |
 | **Downstream Parameter Fault Tolerance** | `drop_unsupported_params` automatically drops unsupported safety categories (e.g. `HARM_CATEGORY_CIVIC_INTEGRITY`) and tools to prevent 400 errors |
 | **Multi-Account Probing** | Extracts and verifies sub-accounts (`u/0`, `u/1`...) automatically when importing a multi-session Cookie |
 | **Built-in Tools** | Supports official tools such as Google Search, Google Maps, and Code Execution sandbox |
@@ -235,6 +236,11 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | `AISTUDIO_DUMP_REQUESTS` | bool | `false` | Dump API request/response exchanges to console logs (enabled via `DEBUG=1`) |
 | `AISTUDIO_DUMP_FILE` | bool | `false` | Dump request/response exchanges to individual disk files |
 | `AISTUDIO_DUMP_DIR` | string | `dumps/` | Target directory for dumped exchange files |
+| `AISTUDIO_ACCOUNT_HEALTH_INTERVAL` | int | `600` | Seconds between proactive account session checks; `0` disables. A 401 from `ListModels` marks the account expired |
+| `AISTUDIO_SESSION_KEEPALIVE_INTERVAL` | int | `1800` | Seconds between idle session keepalives; reloads AI Studio to rotate cookies. `0` disables |
+
+> [!IMPORTANT]
+> Cookie-imported accounts have no OAuth refresh token. If Google has already revoked the session (password change, risk control, device session cleanup, etc.), no keepalive can renew it server-side; re-importing cookies is the only recovery. Health checks and keepalives reduce expiry probability and make expired accounts visible in the console before an API call fails.
 
 ---
 

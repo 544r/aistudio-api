@@ -11,6 +11,7 @@ import type {
   CreatePresetRequest,
   SnapshotPresetRequest,
   ApplyPresetResponse,
+  AccountHealthCheckResponse,
 } from '@/types'
 
 export const accountsApi = {
@@ -20,6 +21,12 @@ export const accountsApi = {
 
   getActive(): Promise<Account> {
     return request<Account>('/api/accounts/active')
+  },
+
+  healthCheck(): Promise<AccountHealthCheckResponse> {
+    return request<AccountHealthCheckResponse>('/api/accounts/health-check', {
+      method: 'POST',
+    })
   },
 
   activate(id: string): Promise<Account> {

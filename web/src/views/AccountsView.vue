@@ -2,7 +2,9 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
+import { useToastStore } from '@/stores/toast.ts'
 import { usePolling } from '@/composables/usePolling.ts'
+import { accountsApi } from '@/api/accounts.ts'
 import type { AccountWithStats } from '@/types/accounts.ts'
 import Button from '@/components/ui/Button.vue'
 import AccountTable from '@/components/accounts/AccountTable.vue'
@@ -17,10 +19,13 @@ import {
   Trash2,
   Folder,
   Check,
+  AlertTriangle,
+  ShieldCheck,
 } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
 const systemStore = useSystemStore()
+const toast = useToastStore()
 
 const importModalOpen = ref(false)
 const editModalOpen = ref(false)
@@ -29,6 +34,17 @@ const snapshotModalOpen = ref(false)
 const snapshotName = ref('')
 const snapshotDesc = ref('')
 const selectedGroup = ref<string>('ALL')
+const checkingHealth = ref(false)
+
+const expiredAccounts = computed(() =>
+  accountsStore.accountRows.filter((a) => a.session_expired),
+)
+const expiredNames = computed(() =>
+  expiredAccounts.value
+    .map((a) => a.email || a.name || a.id)
+    .slice(0, 3)
+    .join('、'),
+)
 
 async function loadData() {
   await Promise.all([
@@ -36,6 +52,30 @@ async function loadData() {
     accountsStore.fetchPresets(),
     accountsStore.fetchGroups(),
   ])
+}
+
+async function handleHealthCheck() {
+  if (checkingHealth.value) return
+  checkingHealth.value = true
+  try {
+    const res = await accountsApi.healthCheck()
+    await loadData()
+    if (res.expired.length > 0) {
+      toast.error(
+        `检测完成：${res.expired.length} 个账号登录态失效，请重新导入 Cookie`,
+      )
+    } else if (res.unknown.length > 0) {
+      toast.success(
+        `检测完成：${res.valid} 个正常，${res.unknown.length} 个网络异常未判定`,
+      )
+    } else {
+      toast.success(`检测完成：${res.valid} 个账号登录态正常`)
+    }
+  } catch (err: unknown) {
+    toast.error(err instanceof Error ? err.message : '账号检测失败')
+  } finally {
+    checkingHealth.value = false
+  }
 }
 
 onMounted(loadData)
@@ -115,6 +155,17 @@ async function handleDeletePreset(presetId: string, name: string) {
         <Button
           variant="outline"
           size="md"
+          :loading="checkingHealth"
+          title="立即用各账号 Cookie 探测登录态"
+          @click="handleHealthCheck"
+        >
+          <ShieldCheck class="w-4 h-4" />
+          <span>检测账号</span>
+        </Button>
+
+        <Button
+          variant="outline"
+          size="md"
           :loading="systemStore.resettingCooldown"
           title="清除所有账号的 429 冷却与配额耗尽标记"
           @click="handleClearAllCooldowns"
@@ -143,6 +194,31 @@ async function handleDeletePreset(presetId: string, name: string) {
           <span>导入 Cookies</span>
         </Button>
       </div>
+    </div>
+
+    <!-- Expired Accounts Banner -->
+    <div
+      v-if="expiredAccounts.length > 0"
+      class="flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 sm:flex-row sm:items-center"
+    >
+      <AlertTriangle class="w-5 h-5 shrink-0 text-rose-600" />
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-semibold text-rose-800">
+          有 {{ expiredAccounts.length }} 个账号登录态已失效
+        </p>
+        <p class="mt-0.5 text-xs leading-relaxed text-rose-700">
+          {{ expiredNames }}{{ expiredAccounts.length > 3 ? ' 等' : '' }} 已被暂停使用，调用时不会选中它们。请重新导入 Cookie，或点击账号行的「恢复」后重试。
+        </p>
+      </div>
+      <Button
+        variant="secondary"
+        size="sm"
+        :loading="checkingHealth"
+        @click="handleHealthCheck"
+      >
+        <ShieldCheck class="w-3.5 h-3.5" />
+        重新检测
+      </Button>
     </div>
 
     <!-- Presets & Custom Schemes Ribbon -->

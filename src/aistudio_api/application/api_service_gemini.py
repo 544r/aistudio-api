@@ -174,8 +174,23 @@ async def handle_attempt_exception(
         ) from exc
 
     if isinstance(exc, SessionExpiredError):
-        logger.warning("账号会话失效，已被重定向到登录页: %s", exc)
+        logger.warning("账号会话失效: %s", exc)
         client.clear_templates()
+        if not has_yielded_data and attempt == 0 and active_acc is not None:
+            # 可能是 BotGuard 快照或 Cookie 轮换滞后，先原地刷新一次再判定永久失效
+            refreshed = None
+            if account_svc is not None and client.session is not None:
+                try:
+                    refreshed = await account_svc.activate_account(
+                        active_acc.id, client.session
+                    )
+                except SessionExpiredError:
+                    refreshed = None
+                except Exception as refresh_exc:
+                    logger.warning("会话原地刷新失败: %s", refresh_exc)
+            if refreshed is not None:
+                logger.info("已原地刷新账号 %s 会话，重试一次", active_acc.id)
+                return True
         if not has_yielded_data and await try_switch_account(
             model=target_model,
             failed_account_id=failed_id,
@@ -598,9 +613,7 @@ def _build_gemini_streaming_response(
                     raise
 
             target_model = normalized.model if normalized else model_path
-            record_rotator_event(
-                "success", model=target_model, usage=final_usage
-            )
+            record_rotator_event("success", model=target_model, usage=final_usage)
             if normalized is not None:
                 runtime_state.record(
                     normalized.model,

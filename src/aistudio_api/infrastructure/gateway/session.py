@@ -129,6 +129,11 @@ class BrowserSession:
         return self._gate.is_ready()
 
     @property
+    def in_flight(self) -> int:
+        """当前进行中的请求数量，供会话保活避让。"""
+        return self._in_flight
+
+    @property
     def active_context(self) -> SessionContext | None:
         return self._gate.active_context
 

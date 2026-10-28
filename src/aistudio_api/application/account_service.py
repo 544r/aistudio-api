@@ -34,6 +34,10 @@ class AccountService:
         """获取单个账号。"""
         return self._store.get_account(account_id)
 
+    def get_auth_path(self, account_id: str) -> Path | None:
+        """获取账号的 auth.json 路径。"""
+        return self._store.get_auth_path(account_id)
+
     def get_active_account(self) -> AccountMeta | None:
         """获取当前活跃账号。"""
         return self._store.get_active_account()

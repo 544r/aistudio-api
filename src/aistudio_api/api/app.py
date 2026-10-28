@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from aistudio_api.application.api_service_gemini import classify_gemini_error_payload
+from aistudio_api.config import settings
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import (
     get_configured_logging_settings,
@@ -134,7 +135,54 @@ async def lifespan(_app: FastAPI):
                                     )
                     except Exception:
                         pass
+
     tier_task = asyncio.create_task(_auto_refresh_tiers())
+
+    async def _account_maintenance():
+        from aistudio_api.application.account_health import (
+            check_all_accounts,
+            keepalive_active_session,
+        )
+
+        await asyncio.sleep(30)
+        last_health = 0.0
+        last_keepalive = time.monotonic()
+        while True:
+            now = time.monotonic()
+            if (
+                settings.account_health_interval > 0
+                and now - last_health >= settings.account_health_interval
+            ):
+                last_health = now
+                try:
+                    summary = await check_all_accounts(account_service, rotator)
+                    if summary["expired"]:
+                        logger.error(
+                            "账号巡检发现 %d 个登录态失效: %s",
+                            len(summary["expired"]),
+                            ", ".join(str(i) for i in summary["expired"]),
+                        )
+                    else:
+                        logger.info(
+                            "账号巡检完成: 有效 %s / 共 %s，未知 %s",
+                            summary["valid"],
+                            summary["checked"],
+                            len(summary["unknown"]),
+                        )
+                except Exception as e:
+                    logger.warning("账号巡检失败: %s", e)
+            if (
+                settings.session_keepalive_interval > 0
+                and now - last_keepalive >= settings.session_keepalive_interval
+            ):
+                last_keepalive = now
+                try:
+                    await keepalive_active_session()
+                except Exception as e:
+                    logger.warning("会话保活任务异常: %s", e)
+            await asyncio.sleep(60)
+
+    maintenance_task = asyncio.create_task(_account_maintenance())
 
     yield
     logger.info("服务正在关闭")
@@ -142,6 +190,8 @@ async def lifespan(_app: FastAPI):
         warmup_task.cancel()
     if tier_task and not tier_task.done():
         tier_task.cancel()
+    if not maintenance_task.done():
+        maintenance_task.cancel()
     if client:
         try:
             await client.close()
@@ -155,7 +205,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="AI Studio API", lifespan=lifespan)
 app.include_router(system_public_router)
 app.include_router(system_protected_router, dependencies=[Depends(require_web_auth)])
-app.include_router(accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)])
+app.include_router(
+    accounts_router, prefix="/api", dependencies=[Depends(require_web_auth)]
+)
 app.include_router(accounts_router, dependencies=[Depends(require_web_auth)])
 app.include_router(gemini_router, dependencies=[Depends(require_api_key)])
 app.include_router(models_router, dependencies=[Depends(require_api_key)])
@@ -259,9 +311,7 @@ async def logging_and_dump_middleware(request, call_next):
 
     is_static = path.startswith(("/static", "/assets")) or path in ("/favicon.ico",)
     # 日志查看与健康检查轮询不写入访问日志/转储，避免把真正的业务日志挤掉
-    is_silent_poll = (
-        path == "/logs" or path.startswith("/logs/") or path == "/health"
-    )
+    is_silent_poll = path == "/logs" or path.startswith("/logs/") or path == "/health"
     dump_enabled = is_dump_requests_enabled() and not is_static and not is_silent_poll
 
     req_id = ""
@@ -273,7 +323,9 @@ async def logging_and_dump_middleware(request, call_next):
     if dump_enabled:
         req_id = f"req_{secrets.token_hex(4)}"
         client_str = (
-            f"{request.client.host}:{request.client.port}" if request.client else "unknown"
+            f"{request.client.host}:{request.client.port}"
+            if request.client
+            else "unknown"
         )
         headers_dict = dict(request.headers)
         query_dict = dict(request.query_params)
@@ -405,7 +457,9 @@ async def spa_navigation_middleware(request: Request, call_next):
     if is_html_nav and (is_accounts_spa or not is_api) and index_html_path.is_file():
         response = FileResponse(index_html_path)
         response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
         return response
 
     response = await call_next(request)
@@ -417,7 +471,9 @@ async def spa_navigation_middleware(request: Request, call_next):
                 response.headers["Vary"] = f"{existing_vary}, Accept"
         else:
             response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
 
     return response
 
@@ -428,7 +484,9 @@ async def root_index():
     if index_html_path.is_file():
         response = FileResponse(index_html_path)
         response.headers["Vary"] = "Accept"
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, max-age=0"
+        )
         return response
     return JSONResponse({"message": "AI Studio API Web UI"})
 

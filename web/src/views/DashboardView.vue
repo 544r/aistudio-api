@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { usePolling } from '@/composables/usePolling.ts'
 import StatCard from '@/components/ui/StatCard.vue'
+import Button from '@/components/ui/Button.vue'
 import ModelStatsTable from '@/components/dashboard/ModelStatsTable.vue'
 import QuickApiExamples from '@/components/dashboard/QuickApiExamples.vue'
 import {
@@ -17,6 +19,17 @@ import {
 
 const accountsStore = useAccountsStore()
 const systemStore = useSystemStore()
+const router = useRouter()
+
+const expiredAccounts = computed(() =>
+  accountsStore.accountRows.filter((a) => a.session_expired),
+)
+const expiredNames = computed(() =>
+  expiredAccounts.value
+    .map((a) => a.email || a.name || a.id)
+    .slice(0, 3)
+    .join('、'),
+)
 
 const activeAccountDisplay = computed(() => {
   const acc = accountsStore.activeAccount
@@ -64,6 +77,29 @@ usePolling(loadData, 10000)
 
 <template>
   <div class="space-y-6">
+    <!-- Expired Accounts Banner -->
+    <div
+      v-if="expiredAccounts.length > 0"
+      class="flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 sm:flex-row sm:items-center"
+    >
+      <AlertTriangle class="w-5 h-5 shrink-0 text-rose-600" />
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-semibold text-rose-800">
+          有 {{ expiredAccounts.length }} 个账号登录态已失效
+        </p>
+        <p class="mt-0.5 text-xs leading-relaxed text-rose-700">
+          {{ expiredNames }}{{ expiredAccounts.length > 3 ? ' 等' : '' }} 已被暂停使用，调用时会自动跳过它们。请到「账号管理」重新导入 Cookie 或点击「恢复」。
+        </p>
+      </div>
+      <Button
+        variant="secondary"
+        size="sm"
+        @click="router.push('/accounts')"
+      >
+        去处理
+      </Button>
+    </div>
+
     <!-- Stat Cards Grid -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
       <StatCard

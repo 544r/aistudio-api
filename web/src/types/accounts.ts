@@ -48,6 +48,13 @@ export interface SnapshotPresetRequest {
   description?: string
 }
 
+export interface AccountHealthCheckResponse {
+  checked: number
+  valid: number
+  expired: string[]
+  unknown: string[]
+}
+
 export interface ApplyPresetResponse {
   ok: boolean
   preset_id: string

@@ -43,6 +43,7 @@ def _load_int_env(*names: str, default: int) -> int:
         return default
     return int(value)
 
+
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
@@ -64,6 +65,7 @@ def _load_dump_to_file_env() -> bool:
     if val is None:
         return False
     return val.strip().lower() in ("1", "true", "yes", "on", "dump", "y", "t")
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _PROJECT_ROOT / "data"
@@ -267,6 +269,12 @@ class Settings:
     config_file: str = str(resolve_config_file())
     persist_stats: bool = _load_bool_env("AISTUDIO_PERSIST_STATS", default=True)
     persist_rotator: bool = _load_bool_env("AISTUDIO_PERSIST_ROTATOR", default=True)
+    account_health_interval: int = _load_int_env(
+        "AISTUDIO_ACCOUNT_HEALTH_INTERVAL", default=600
+    )
+    session_keepalive_interval: int = _load_int_env(
+        "AISTUDIO_SESSION_KEEPALIVE_INTERVAL", default=1800
+    )
     dump_requests: bool = _load_dump_requests_env()
     dump_to_file: bool = _load_dump_to_file_env()
     dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))

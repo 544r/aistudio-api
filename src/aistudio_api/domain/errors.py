@@ -104,7 +104,9 @@ def classify_error(status: int, body: str) -> AistudioError:
     if grpc_code == 8 or status == 429:
         return UsageLimitExceeded(f"配额用完: {clean_msg}")
     if grpc_code == 16 or status == 401:
-        return AuthError(f"认证失败: {clean_msg}")
+        # 401/UNAUTHENTICATED 表示 Cookie 本身已失效，必须按登录态失效处理，
+        # 否则账号会在短冷却后带着死 Cookie 再次参与调度。
+        return SessionExpiredError(f"认证失败: {clean_msg}")
     if grpc_code == 7 or status == 403:
         return AuthError(f"禁止访问: {clean_msg}")
     effective_status = GRPC_CODE_TO_HTTP.get(grpc_code, status) if grpc_code else status

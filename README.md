@@ -53,6 +53,7 @@
 | **Cookie 自动回写** | 运行期间每 60 秒把受控浏览器中的最新 Cookie 回写账号 `auth.json`，切号前与退出前也会保存，避免重启后注入过期快照 |
 | **管理密码即时修改** | 控制台顶部“修改密码”校验当前密码后立即生效，无需重启容器；新密码以哈希形式保存到 `data/web_auth.json`，随数据卷持久化 |
 | **网页端运行日志** | 新增“运行日志”页，实时查看最近 500 条服务端日志，并可浏览、展开已落盘的请求报文；支持一键清空服务端日志与转储文件，排查问题无需登录服务器执行 `docker logs` |
+| **账号巡检与会话保活** | 每 10 分钟主动检测账号 Cookie，401 立即标记登录态失效并在控制台标红；每 30 分钟在空闲时重载 AI Studio 轮换 Cookie，降低导入会话过期概率 |
 | **下游参数容错与丢弃** | 支持配置 `drop_unsupported_params` 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
 | **内置搜索与工具** | 支持 Google Search 联网搜索、Google Maps、代码执行沙箱等官方扩展能力 |
@@ -237,6 +238,12 @@ docker compose up -d
 | `AISTUDIO_DUMP_REQUESTS` | bool | `false` | 是否在终端转储每次 API 交互报文详情（支持 `DEBUG=1` 触发） |
 | `AISTUDIO_DUMP_FILE` | bool | `false` | 是否将请求与响应报文详情落盘保存 |
 | `AISTUDIO_DUMP_DIR` | string | `dumps/` | 报文转储保存目录 |
+| `AISTUDIO_ACCOUNT_HEALTH_INTERVAL` | int | `600` | 账号登录态主动巡检间隔（秒），`0` 关闭；用 Cookie 请求 `ListModels`，401 立即标记失效 |
+| `AISTUDIO_SESSION_KEEPALIVE_INTERVAL` | int | `1800` | 活跃账号会话保活间隔（秒），空闲时重载 AI Studio 触发 Cookie 轮换，`0` 关闭 |
+
+> [!IMPORTANT]
+> Cookie 导入账号没有 OAuth refresh token。若 Google 已主动撤销该会话（改密、异地风控、设备会话清理等），任何保活都无法在服务端续期，只能重新导入 Cookie。巡检与保活的作用是降低过期概率，并让控制台在调用失败前就明确标出失效账号。
+
 ---
 
 ## API 调用示例
