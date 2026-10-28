@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, toRef, onMounted } from 'vue'
+import { ref, computed, toRef, onMounted, onUnmounted } from 'vue'
 import type { AccountWithStats } from '@/types/accounts.ts'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
@@ -37,23 +37,26 @@ const statusFilter = ref<'all' | 'ready' | 'limited' | 'expired'>('all')
 const filteredAccounts = computed<AccountWithStats[]>(() => {
   const kw = searchKeyword.value.trim().toLowerCase()
   return props.accounts.filter((acc) => {
+    const isDisabled = acc.enabled === false
     // 状态过滤
     if (statusFilter.value === 'expired') {
       if (!acc.session_expired) return false
     } else if (statusFilter.value === 'limited') {
-      if (acc.session_expired || acc.is_available !== false) return false
+      if (isDisabled || acc.session_expired || acc.is_available !== false) return false
     } else if (statusFilter.value === 'ready') {
-      if (acc.session_expired || acc.is_available === false) return false
+      if (isDisabled || acc.session_expired || acc.is_available === false) return false
     }
 
     // 关键词过滤
     if (!kw) return true
+    const authUser = String(acc.auth_user ?? '')
     const inName = (acc.name || '').toLowerCase().includes(kw)
     const inEmail = (acc.email || '').toLowerCase().includes(kw)
     const inId = acc.id.toLowerCase().includes(kw)
-    const inAuthUser = `u/${acc.auth_user}`.toLowerCase().includes(kw) || acc.auth_user === kw
+    const inAuthUser = `u/${authUser}`.toLowerCase().includes(kw) || authUser.toLowerCase() === kw
     const inTier = (acc.tier || 'free').toLowerCase().includes(kw)
-    return inName || inEmail || inId || inAuthUser || inTier
+    const inGroup = (acc.group || 'default').toLowerCase().includes(kw)
+    return inName || inEmail || inId || inAuthUser || inTier || inGroup
   })
 })
 
@@ -117,16 +120,60 @@ function toggleAllModels() {
   forceExpandAllModels.value = !forceExpandAllModels.value
 }
 
-// 美西午夜刷新倒计时计算
+// 美西午夜刷新倒计时（按 America/Los_Angeles 时区，自动处理夏令时）
+const nowMs = ref(Date.now())
+let midnightTimer: number | undefined
+
+onMounted(() => {
+  midnightTimer = window.setInterval(() => {
+    nowMs.value = Date.now()
+  }, 30000)
+})
+
+onUnmounted(() => {
+  if (midnightTimer !== undefined) {
+    window.clearInterval(midnightTimer)
+  }
+})
+
+function pacificOffsetMinutes(ts: number): number {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      timeZoneName: 'longOffset',
+    }).formatToParts(new Date(ts))
+    const zone = parts.find((part) => part.type === 'timeZoneName')?.value || ''
+    const match = zone.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/)
+    if (!match) return -480
+    const sign = match[1] === '-' ? -1 : 1
+    return sign * (Number(match[2]) * 60 + Number(match[3] || '0'))
+  } catch {
+    return -480
+  }
+}
+
+const pacificSecondsOfDay = computed(() => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(nowMs.value))
+  const read = (type: string) =>
+    Number(parts.find((part) => part.type === type)?.value || '0')
+  return (read('hour') % 24) * 3600 + read('minute') * 60 + read('second')
+})
+
 const hoursUntilPacificMidnight = computed(() => {
-  const now = new Date()
-  // 计算基于 UTC-8（美西冬令时/夏令时标准区间）
-  const utcNow = now.getTime() + now.getTimezoneOffset() * 60000
-  const pacificOffsetHours = -8
-  const pacificNow = new Date(utcNow + 3600000 * pacificOffsetHours)
-  const hoursLeft = 23 - pacificNow.getHours()
-  const minutesLeft = 59 - pacificNow.getMinutes()
-  return `${hoursLeft} 小时 ${minutesLeft} 分`
+  const secondsLeft = 86400 - pacificSecondsOfDay.value
+  const offsetNow = pacificOffsetMinutes(nowMs.value)
+  const offsetAtMidnight = pacificOffsetMinutes(nowMs.value + secondsLeft * 1000)
+  const minutesLeft = Math.max(
+    0,
+    Math.ceil((secondsLeft - (offsetAtMidnight - offsetNow) * 60) / 60),
+  )
+  return `${Math.floor(minutesLeft / 60)} 小时 ${minutesLeft % 60} 分`
 })
 
 // 清理幽灵残留状态
@@ -288,7 +335,7 @@ async function handleClearModelCooldown(accountId: string, model: string) {
         <!-- Quota Reset Functional Info -->
         <div class="flex items-center gap-1.5 text-xs text-gray-500 font-mono shrink-0">
           <Clock class="w-3.5 h-3.5 text-gray-400" />
-          <span>每日配额刷新 (00:00 PST): 还剩 {{ hoursUntilPacificMidnight }}</span>
+          <span>每日配额刷新 (00:00 太平洋时间): 还剩 {{ hoursUntilPacificMidnight }}</span>
         </div>
       </div>
     </div>

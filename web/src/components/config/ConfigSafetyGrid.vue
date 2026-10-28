@@ -39,6 +39,13 @@ function getLevel(catKey: string): number {
 function setLevel(catKey: string, val: number) {
   if (props.disabled) return
   const next: SafetySettingsMap = { ...(props.modelValue || {}) }
+  // 未显式配置的分类在界面上按 5（关闭拦截）展示，写回时补齐，
+  // 避免保存后配置里只剩本次修改的分类、界面却仍显示其他分类为 5。
+  for (const cat of categories) {
+    if (next[cat.key] === undefined) {
+      next[cat.key] = 5
+    }
+  }
   next[catKey] = val
   emit('update:modelValue', next)
 }

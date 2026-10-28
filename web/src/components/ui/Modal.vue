@@ -35,6 +35,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  document.body.style.overflow = ''
 })
 
 watch(
@@ -45,7 +46,8 @@ watch(
     } else {
       document.body.style.overflow = ''
     }
-  }
+  },
+  { immediate: true }
 )
 
 const widthClasses: Record<string, string> = {

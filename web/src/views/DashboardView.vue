@@ -50,6 +50,8 @@ const cachedTokensDisplay = computed(() => {
   return tokens.toLocaleString()
 })
 
+const modelNames = computed(() => Object.keys(systemStore.stats?.models || {}))
+
 async function loadData() {
   await Promise.all([
     accountsStore.fetchAll(),
@@ -133,6 +135,6 @@ usePolling(loadData, 10000)
     />
 
     <!-- Quick API Reference Snippets -->
-    <QuickApiExamples />
+    <QuickApiExamples :models="modelNames" />
   </div>
 </template>

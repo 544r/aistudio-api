@@ -21,6 +21,7 @@ withDefaults(defineProps<Props>(), {
     <div class="flex items-baseline gap-2">
       <div
         class="text-2xl font-bold tracking-tight truncate max-w-full"
+        :title="String(value)"
         :class="{
           'text-gray-900': color === 'default',
           'text-emerald-600': color === 'green',

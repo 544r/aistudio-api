@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
+import { useToastStore } from '@/stores/toast.ts'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
 import { Sparkles, FileText, Upload, FolderOpen, CheckCircle2 } from 'lucide-vue-next'
-defineProps<{
+const props = defineProps<{
   modelValue: boolean
 }>()
 
@@ -13,6 +14,7 @@ const emit = defineEmits<{
 }>()
 
 const accountsStore = useAccountsStore()
+const toast = useToastStore()
 
 const activeTab = ref<'text' | 'file'>('text')
 
@@ -37,9 +39,12 @@ function onFileChange(event: Event) {
 
   selectedFileName.value = file.name
   selectedFileSize.value = `${(file.size / 1024).toFixed(1)} KB`
+  selectedFileContent.value = ''
+  detectedCount.value = null
 
   const reader = new FileReader()
   reader.onload = (e) => {
+    if (!props.modelValue || selectedFileName.value !== file.name) return
     const text = (e.target?.result as string) || ''
     selectedFileContent.value = text
     try {
@@ -49,6 +54,12 @@ function onFileChange(event: Event) {
     } catch {
       detectedCount.value = null
     }
+  }
+  reader.onerror = () => {
+    if (!props.modelValue || selectedFileName.value !== file.name) return
+    selectedFileContent.value = ''
+    detectedCount.value = null
+    toast.error('读取文件失败，请重新选择')
   }
   reader.readAsText(file)
 }
@@ -62,6 +73,16 @@ function clearSelectedFile() {
     fileInputRef.value.value = ''
   }
 }
+
+watch(
+  () => props.modelValue,
+  (open) => {
+    if (!open) {
+      clearSelectedFile()
+      localFilePath.value = ''
+    }
+  },
+)
 async function handleSubmit() {
   if (activeTab.value === 'file') {
     const content = selectedFileContent.value.trim()

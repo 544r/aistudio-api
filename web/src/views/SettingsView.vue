@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
-import type { SystemConfig } from '@/types/system.ts'
+import type { SystemConfig, UpdateLoggingConfigResponse } from '@/types/system.ts'
 import ApiKeyManagerCard from '@/components/settings/ApiKeyManagerCard.vue'
 import LogConfigCard from '@/components/settings/LogConfigCard.vue'
 import VisualConfigEditor from '@/components/config/VisualConfigEditor.vue'
@@ -35,6 +35,19 @@ async function loadConfig() {
 onMounted(() => {
   void loadConfig()
 })
+
+// 只合并日志字段，避免整份配置重载时覆盖可视化编辑器里尚未保存的模型规则改动
+function handleLoggingSaved(res: UpdateLoggingConfigResponse) {
+  if (!config.value) return
+  config.value = {
+    ...config.value,
+    log_level: res.log_level,
+    dump_requests: res.dump_requests,
+    debug_env_active: res.debug_env_active,
+    dump_to_file: res.dump_to_file,
+    dump_dir: res.dump_dir,
+  }
+}
 </script>
 
 <template>
@@ -137,7 +150,7 @@ onMounted(() => {
     <LogConfigCard
       v-if="config"
       :initial-config="config"
-      @saved="loadConfig"
+      @saved="handleLoggingSaved"
     />
     <!-- API Key Management Card -->
     <ApiKeyManagerCard />

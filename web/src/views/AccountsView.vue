@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAccountsStore } from '@/stores/accounts.ts'
 import { useSystemStore } from '@/stores/system.ts'
 import { usePolling } from '@/composables/usePolling.ts'
@@ -44,12 +44,18 @@ usePolling(loadData, 8000)
 const allGroups = computed(() => {
   const set = new Set<string>()
   accountsStore.accounts.forEach((a) => {
-    if (a.group) set.add(a.group)
+    set.add(a.group || 'default')
   })
   accountsStore.groups.forEach((g) => {
     if (g) set.add(g)
   })
   return Array.from(set).sort()
+})
+
+watch(allGroups, (groups) => {
+  if (selectedGroup.value !== 'ALL' && !groups.includes(selectedGroup.value)) {
+    selectedGroup.value = 'ALL'
+  }
 })
 
 const filteredAccounts = computed(() => {
@@ -202,7 +208,7 @@ async function handleDeletePreset(presetId: string, name: string) {
           ]"
           @click="selectedGroup = 'ALL'"
         >
-          全部分组 ({{ accountsStore.accounts.length }})
+          全部账号 ({{ accountsStore.accounts.length }})
         </button>
 
         <button

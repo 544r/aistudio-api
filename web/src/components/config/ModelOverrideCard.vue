@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ModelOverrideMap, ModelOverrideItem, ThinkingConfig } from './types.ts'
 import {
   TOOL_SUGGESTIONS,
@@ -17,6 +17,7 @@ import { Plus, Trash2, ChevronDown, ChevronRight, Layers, Cpu, Wrench } from 'lu
 
 const props = defineProps<{
   models: ModelOverrideMap
+  filterKeyword?: string
 }>()
 
 const emit = defineEmits<{
@@ -25,6 +26,17 @@ const emit = defineEmits<{
 
 const newModelName = ref('')
 const expandedMap = ref<Record<string, boolean>>({})
+
+const visibleModels = computed<ModelOverrideMap>(() => {
+  const kw = (props.filterKeyword || '').trim().toLowerCase()
+  const all = props.models || {}
+  if (!kw) return all
+  const filtered: ModelOverrideMap = {}
+  for (const [key, val] of Object.entries(all)) {
+    if (key.toLowerCase().includes(kw)) filtered[key] = val
+  }
+  return filtered
+})
 
 function toggleExpand(modelKey: string) {
   expandedMap.value[modelKey] = !expandedMap.value[modelKey]
@@ -129,11 +141,11 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
 
     <!-- Override List -->
     <div
-      v-if="Object.keys(models || {}).length"
+      v-if="Object.keys(visibleModels).length"
       class="space-y-3"
     >
       <div
-        v-for="(override, modelKey) in models"
+        v-for="(override, modelKey) in visibleModels"
         :key="modelKey"
         class="bg-white border border-gray-200/90 rounded-2xl shadow-xs overflow-hidden"
       >
@@ -339,7 +351,12 @@ function updateModelThinkingConfig(modelKey: string, level: string | null) {
       v-else
       class="p-8 text-center text-gray-400 text-xs border border-dashed border-gray-200 rounded-2xl bg-gray-50/50"
     >
-      暂无单模型覆盖配置，全部模型遵循上方 Profiles 分组规则。
+      <template v-if="(filterKeyword || '').trim()">
+        未找到匹配 "{{ filterKeyword }}" 的模型覆盖规则；新建的模型若不含该关键词也不会显示。
+      </template>
+      <template v-else>
+        暂无单模型覆盖配置，全部模型遵循上方 Profiles 分组规则。
+      </template>
     </div>
   </div>
 </template>

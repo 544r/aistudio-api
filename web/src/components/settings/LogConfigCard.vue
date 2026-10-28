@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
-import type { SystemConfig } from '@/types/system.ts'
+import type { SystemConfig, UpdateLoggingConfigResponse } from '@/types/system.ts'
 import Button from '@/components/ui/Button.vue'
 import ConfigSelect from '@/components/config/ConfigSelect.vue'
 import ConfigSwitch from '@/components/config/ConfigSwitch.vue'
@@ -21,7 +21,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  saved: []
+  saved: [res: UpdateLoggingConfigResponse]
 }>()
 
 const toast = useToastStore()
@@ -66,7 +66,7 @@ async function handleSave() {
     dumpToFile.value = res.dump_to_file
     dumpDir.value = res.dump_dir
     debugEnvActive.value = res.debug_env_active
-    emit('saved')
+    emit('saved', res)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '保存配置失败'
     toast.error(msg)

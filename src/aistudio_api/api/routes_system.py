@@ -450,6 +450,9 @@ async def create_api_key(req: CreateApiKeyRequest) -> ApiKeyItemModel:
                     {"name": "API Key", "key": item.strip(), "created_at": ""}
                 )
 
+    if any(item.get("key") == new_key for item in new_list):
+        raise HTTPException(409, detail="该 API Key 已存在，请使用其他密钥或留空自动生成")
+
     new_list.append({"name": name, "key": new_key, "created_at": created_at})
     parsed["api_keys"] = new_list
 

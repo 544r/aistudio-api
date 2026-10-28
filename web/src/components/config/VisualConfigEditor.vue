@@ -36,6 +36,7 @@ const toast = useToastStore()
 const activeTab = ref<'visual' | 'yaml'>('visual')
 const rawYaml = ref(props.initialYaml || '')
 const parsedConfig = ref<ParsedConfigYaml>({})
+const initialSnapshot = ref('')
 const yamlParseError = ref<string | null>(null)
 const saving = ref(false)
 const dictModalOpen = ref(false)
@@ -56,19 +57,6 @@ const filteredProfilesWithIndex = computed(() => {
     })
 })
 
-const filteredModels = computed(() => {
-  const allModels = parsedConfig.value.model_defaults?.models || {}
-  const kw = filterKeyword.value.trim().toLowerCase()
-  if (!kw) return allModels
-  const result: ModelOverrideMap = {}
-  for (const [key, val] of Object.entries(allModels)) {
-    if (key.toLowerCase().includes(kw)) {
-      result[key] = val
-    }
-  }
-  return result
-})
-
 function parseYamlToState(content: string): boolean {
   try {
     const doc = YAML.parse(content) || {}
@@ -85,25 +73,30 @@ function parseYamlToState(content: string): boolean {
   }
 }
 
-function syncStateToYaml(): string {
+function serializeState(): string {
   try {
-    const dumped = YAML.stringify(parsedConfig.value, {
+    return YAML.stringify(parsedConfig.value, {
       indent: 2,
     })
-    rawYaml.value = dumped
-    return dumped
   } catch (err) {
     console.error('序列化 YAML 失败:', err)
     return rawYaml.value
   }
 }
 
+function syncStateToYaml(): string {
+  const dumped = serializeState()
+  rawYaml.value = dumped
+  return dumped
+}
+
 watch(
   () => props.initialYaml,
   (val) => {
-    if (val !== undefined) {
-      rawYaml.value = val
-      parseYamlToState(val)
+    if (val === undefined) return
+    rawYaml.value = val
+    if (parseYamlToState(val)) {
+      initialSnapshot.value = JSON.stringify(parsedConfig.value)
     }
   },
   { immediate: true }
@@ -124,8 +117,12 @@ function switchTab(tab: 'visual' | 'yaml') {
 
 function handleAddProfile() {
   const currentProfiles = parsedConfig.value.model_defaults?.profiles || []
+  let suffix = currentProfiles.length + 1
+  while (currentProfiles.some((profile) => profile.name === `profile_${suffix}`)) {
+    suffix += 1
+  }
   const newProfile: ModelProfileItem = {
-    name: `profile_${currentProfiles.length + 1}`,
+    name: `profile_${suffix}`,
     match: {
       prefixes: ['gemini-'],
     },
@@ -198,14 +195,8 @@ function updateGlobalDropUnsupported(val: boolean) {
 
 function handleResetDefaults() {
   if (confirm('确定要将所有模型规则重置为官方推荐默认预设吗？')) {
-    const currentApiKeys = parsedConfig.value.api_keys || []
-    const currentLogging = (parsedConfig.value as Record<string, unknown>).logging || {
-      level: 'INFO',
-      dump_requests: false,
-    }
     const doc: ParsedConfigYaml = {
-      api_keys: currentApiKeys,
-      logging: currentLogging,
+      ...parsedConfig.value,
       model_defaults: {
         drop_unsupported_params: false,
         profiles: [
@@ -264,11 +255,55 @@ function handleResetDefaults() {
   }
 }
 
+function changedTopLevelKeys(): string[] {
+  let baseline: Record<string, unknown> = {}
+  try {
+    baseline = JSON.parse(initialSnapshot.value) as Record<string, unknown>
+  } catch {
+    return []
+  }
+  const local = parsedConfig.value as Record<string, unknown>
+  const keys = new Set([...Object.keys(baseline), ...Object.keys(local)])
+  return Array.from(keys).filter(
+    (key) =>
+      key !== 'model_defaults' &&
+      JSON.stringify(local[key]) !== JSON.stringify(baseline[key]),
+  )
+}
+
+// 可视化模式只编辑 model_defaults；保存前把服务端最新的其他顶层配置（API Key、日志等）
+// 合并回来，避免在别的卡片里刚改过的内容被旧快照覆盖。
+async function buildVisualSaveContent(): Promise<string> {
+  const local = parsedConfig.value
+  const changed = changedTopLevelKeys()
+  try {
+    const latest = await systemApi.getConfig()
+    const parsedLatest = YAML.parse(latest.yaml_content) || {}
+    if (typeof parsedLatest !== 'object' || parsedLatest === null) {
+      throw new Error('invalid config')
+    }
+    const merged = { ...(parsedLatest as Record<string, unknown>) }
+    for (const key of changed) {
+      if (key in (local as Record<string, unknown>)) {
+        merged[key] = (local as Record<string, unknown>)[key]
+      } else {
+        delete merged[key]
+      }
+    }
+    merged.model_defaults = local.model_defaults ?? {}
+    return YAML.stringify(merged, { indent: 2 })
+  } catch (err) {
+    console.warn('读取最新配置失败，回退为本地内容保存:', err)
+    return serializeState()
+  }
+}
+
 async function handleSave() {
   saving.value = true
   let contentToSave = rawYaml.value
   if (activeTab.value === 'visual') {
-    contentToSave = syncStateToYaml()
+    contentToSave = await buildVisualSaveContent()
+    rawYaml.value = contentToSave
   } else {
     // Check YAML validity
     const ok = parseYamlToState(rawYaml.value)
@@ -304,9 +339,22 @@ function handleYamlKeydown(e: KeyboardEvent) {
   }
 }
 
+function yamlMatchesBaseline(content: string): boolean {
+  try {
+    const parsed = YAML.parse(content)
+    if (typeof parsed !== 'object' || parsed === null) return false
+    return JSON.stringify(parsed) === initialSnapshot.value
+  } catch {
+    return false
+  }
+}
+
 const hasUnsavedChanges = computed(() => {
-  const current = activeTab.value === 'visual' ? syncStateToYaml() : rawYaml.value
-  return Boolean(props.initialYaml && current.trim() !== props.initialYaml.trim())
+  if (!props.initialYaml) return false
+  if (activeTab.value === 'yaml') {
+    return !yamlMatchesBaseline(rawYaml.value)
+  }
+  return JSON.stringify(parsedConfig.value) !== initialSnapshot.value
 })
 
 onBeforeRouteLeave((_to, _from, next) => {
@@ -496,7 +544,8 @@ onBeforeRouteLeave((_to, _from, next) => {
 
       <!-- Section 2: Specific Model Overrides -->
       <ModelOverrideCard
-        :models="filteredModels"
+        :models="parsedConfig.model_defaults?.models || {}"
+        :filter-keyword="filterKeyword"
         @update:models="updateModelsOverride"
       />
     </div>
