@@ -35,6 +35,7 @@
   - [Python SDK (google-genai)](#python-sdk-google-genai)
   - [Function Calling](#function-calling)
 - [Web Management Console](#web-management-console)
+- [Browser Cookie Auto-Push (Userscript)](#browser-cookie-auto-push-userscript)
 - [Development & Testing](#development--testing)
 - [License](#license)
 
@@ -394,6 +395,32 @@ The service includes a built-in static Web Console served at `http://localhost:8
 - **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
 - **Logs**: Live view of the latest 500 server log entries with pause, refresh, and one-click clear; lists, opens, deletes, or clears all request-dump JSON files under `dumps/`. Health checks and the log endpoints' own polling are excluded to keep the view readable.
 - **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`. After logging in, use "Change Password" in the top bar to verify the current password and update it instantly without restarting. The new password is stored as a hash in `data/web_auth.json` and persists with the `data` volume; delete that file and restart to fall back to the environment password.
+
+---
+
+## Browser Cookie Auto-Push (Userscript)
+
+Imported cookies are not permanent: Google rotates sessions and revokes stale ones over time, so a pasted cookie is only a snapshot. If your daily Chrome stays signed in to the same Google accounts, let `userscripts/aistudio-cookie-push.user.js` push fresh cookies to this service on a schedule. The server rewrites the matching account's `auth.json`, clears the "session expired" flag, and hot-injects the new cookies into the running Camoufox for the active account — no restart and no manual re-paste.
+
+Setup:
+
+1. Install Tampermonkey, create a new script, and paste the contents of `userscripts/aistudio-cookie-push.user.js`.
+2. Set "Allow scripts to access cookies" to **all** in Tampermonkey (Settings → Advanced config mode → Security → All → Save); otherwise HttpOnly session cookies cannot be read.
+3. Open any AI Studio page and use the script menu:
+   - "⚙ Set server address": e.g. `http://192.168.1.10:8000`
+   - "🔑 Set admin password": the `AISTUDIO_WEB_PASSWORD` value (leave empty when auth is disabled)
+   - "⏱ Set push interval": 60 minutes by default
+4. The script pushes once after page load, then on every interval. A status pill in the bottom-right corner shows the last result; click it to push immediately.
+
+Server behavior (`POST /api/accounts/push-cookies`):
+
+- Matches the account by `email` (or an explicit `account_id`); creates a new account when no match exists.
+- Accounts sharing the same `cookie_id` group (one cookie jar imported by paste) are refreshed together.
+- A successful push clears the account's "session expired" flag and immediately probes the new cookies with `ListModels`; a failed probe marks it expired again.
+- When the pushed account is active and the browser is online, the new cookies are hot-injected into the running browser so a later write-back cannot overwrite them with the old jar.
+- Pushes missing required session cookies (`SID` / `SAPISID` / `__Secure-*PSID`) are rejected with the list of missing names.
+
+> Note: the payload contains full Google session cookies. Only point the script at a trusted server, and prefer a dedicated test account.
 
 ---
 

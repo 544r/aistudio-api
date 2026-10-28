@@ -14,6 +14,8 @@ from aistudio_api.api.dependencies import (
 )
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
+    build_storage_state_from_browser_cookies,
+    missing_session_cookies,
     parse_cookie_string,
     probe_account_benefit_tier,
     probe_account_email,
@@ -143,6 +145,36 @@ class ImportCookiesResponse(BaseModel):
     tier: str = "Free"
 
 
+class PushCookieItem(BaseModel):
+    name: str
+    value: str = ""
+    domain: str | None = None
+    path: str = "/"
+    expirationDate: float | None = None
+    httpOnly: bool | None = None
+    secure: bool | None = None
+    sameSite: str | None = None
+
+
+class PushCookiesRequest(BaseModel):
+    cookies: list[PushCookieItem]
+    email: str | None = None
+    account_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_\-\.@]+$")
+    auth_user: str = "0"
+    source: str | None = None
+
+
+class PushCookiesResponse(BaseModel):
+    account_id: str
+    name: str
+    email: str | None = None
+    cookie_count: int
+    updated_accounts: int = 1
+    created: bool = False
+    session_valid: bool | None = None
+    injected: bool = False
+
+
 class ProbeAndImportRequest(BaseModel):
     cookies: str
     name_prefix: str | None = None
@@ -210,6 +242,167 @@ async def check_accounts_health(
         valid=summary["valid"],
         expired=summary["expired"],
         unknown=summary["unknown"],
+    )
+
+
+@router.post("/push-cookies", response_model=PushCookiesResponse)
+async def push_cookies(
+    req: PushCookiesRequest,
+    account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> PushCookiesResponse:
+    """接收浏览器油猴脚本推送的最新 Cookie 并覆盖账号凭证。
+
+    与粘贴导入的区别：推送来源是真实浏览器的完整 Cookie 罐，因此保留每个
+    Cookie 真实的 domain / path / expires；同一 cookie_id 分组的账号共享
+    同一份 jar，推一次应整组刷新。
+    """
+    import secrets
+
+    from aistudio_api.application.account_health import probe_account_session
+
+    storage_state = build_storage_state_from_browser_cookies(
+        [item.model_dump() for item in req.cookies]
+    )
+    raw_cookies = storage_state.get("cookies")
+    cookie_list: list[dict[str, object]] = (
+        [c for c in raw_cookies if isinstance(c, dict)]
+        if isinstance(raw_cookies, list)
+        else []
+    )
+    if not cookie_list:
+        raise HTTPException(status_code=400, detail="未解析到有效的 Google Cookie")
+
+    missing = missing_session_cookies(
+        str(item.get("name") or "") for item in cookie_list
+    )
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cookie 不完整，缺少会话必需项: {', '.join(missing)}。"
+                "请确认篡改猴已把「允许脚本访问 Cookie」设为 all 后重新推送"
+            ),
+        )
+
+    cookie_dict: dict[str, str] = {}
+    for item in cookie_list:
+        name = str(item.get("name") or "")
+        if name:
+            cookie_dict.setdefault(name, str(item.get("value") or ""))
+
+    auth_user = str(req.auth_user or "0").strip()
+    if not auth_user.isdigit():
+        auth_user = "0"
+
+    accounts = account_service.list_accounts()
+    email = (req.email or "").strip().lower() or None
+    target: AccountMeta | None = None
+    if req.account_id:
+        target = account_service.get_account(req.account_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="指定的账号不存在")
+    elif email:
+        matches = [a for a in accounts if (a.email or "").lower() == email]
+        if matches:
+            same_user = [a for a in matches if (a.auth_user or "0") == auth_user]
+            target = (same_user or matches)[0]
+    if target is None and email is None:
+        with contextlib.suppress(Exception):
+            probed_email = await probe_account_email(cookie_dict, auth_user=auth_user)
+            if probed_email:
+                email = probed_email
+                matches = [a for a in accounts if (a.email or "").lower() == email]
+                if matches:
+                    same_user = [
+                        a for a in matches if (a.auth_user or "0") == auth_user
+                    ]
+                    target = (same_user or matches)[0]
+
+    created = target is None
+    if target is None:
+        target = account_service.save_account_from_cookies(
+            name=email or f"浏览器推送 (u/{auth_user})",
+            email=email,
+            storage_state=storage_state,
+            auth_user=auth_user,
+            cookie_id=f"cookie_{secrets.token_hex(4)}",
+        )
+        updated_accounts = [target]
+    else:
+        group = [
+            a
+            for a in accounts
+            if target.cookie_id and (a.cookie_id or "") == target.cookie_id
+        ]
+        updated_accounts = group or [target]
+        for acc in updated_accounts:
+            account_service.save_account_from_cookies(
+                name=acc.name,
+                email=acc.email,
+                storage_state=storage_state,
+                account_id=acc.id,
+                auth_user=acc.auth_user or "0",
+                cookie_id=acc.cookie_id,
+                tier=acc.tier or "Free",
+                enabled=acc.enabled,
+                group=acc.group or "default",
+                notes=acc.notes or "",
+            )
+
+    if runtime_state.rotator is not None:
+        for acc in updated_accounts:
+            runtime_state.rotator.set_session_expired(acc.id, False)
+
+    session_valid: bool | None = None
+    with contextlib.suppress(Exception):
+        session_valid = await probe_account_session(
+            cookie_dict, auth_user=target.auth_user or auth_user, timeout=6.0
+        )
+    if session_valid is False and runtime_state.rotator is not None:
+        for acc in updated_accounts:
+            runtime_state.rotator.set_session_expired(acc.id, True)
+
+    injected = False
+    browser_session = runtime_state.client._session if runtime_state.client else None
+    active = account_service.get_active_account()
+    if (
+        browser_session is not None
+        and active is not None
+        and any(acc.id == active.id for acc in updated_accounts)
+    ):
+        try:
+            target_auth = account_service.get_account_auth_path(active.id)
+            current_auth = getattr(browser_session, "_auth_file", None)
+            if target_auth and (
+                not current_auth or str(target_auth) == str(current_auth)
+            ):
+                injected = await browser_session.reload_current_account_cookies()
+        except Exception as exc:
+            log.warning("向浏览器热注入推送 Cookie 失败: %s", exc)
+
+    log.info(
+        "收到浏览器 Cookie 推送: account=%s, email=%s, cookies=%d, updated=%d, "
+        "created=%s, injected=%s, session_valid=%s, source=%s",
+        target.name,
+        mask_email(target.email) if target.email else "-",
+        len(cookie_list),
+        len(updated_accounts),
+        created,
+        injected,
+        session_valid,
+        req.source or "-",
+    )
+    target = account_service.get_account(target.id) or target
+    return PushCookiesResponse(
+        account_id=target.id,
+        name=target.name,
+        email=target.email,
+        cookie_count=len(cookie_list),
+        updated_accounts=len(updated_accounts),
+        created=created,
+        session_valid=session_valid,
+        injected=injected,
     )
 
 

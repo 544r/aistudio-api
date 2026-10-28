@@ -36,6 +36,7 @@
   - [Python SDK (google-genai)](#python-sdk-google-genai)
   - [工具调用 (Function Calling)](#工具调用-function-calling)
 - [Web 管理控制台](#web-管理控制台)
+- [浏览器 Cookie 自动推送（油猴脚本）](#浏览器-cookie-自动推送油猴脚本)
 - [开发与测试](#开发与测试)
 - [开源协议](#开源协议)
 
@@ -442,6 +443,32 @@ if response.function_calls:
 - **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
 - **运行日志 (Logs)**：实时查看服务端最近 500 条日志，支持暂停、手动刷新与一键清空；可列出、查看、单个删除或一键清理 `dumps/` 下的请求报文 JSON。健康检查与日志接口自身的轮询不会写入日志，避免刷屏。
 - **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫；登录后可在顶部“修改密码”校验当前密码并即时生效，无需重启。新密码以哈希形式保存在 `data/web_auth.json`，随 `data` 卷持久化；删除该文件并重启可回退到环境变量密码。
+
+---
+
+## 浏览器 Cookie 自动推送（油猴脚本）
+
+Cookie 导入后并不会“永久有效”：Google 会定时轮换并吊销旧会话，粘贴导入的只是导入那一刻的快照。若你日常用 Chrome 登录着同一批 Google 账号，可以让 `userscripts/aistudio-cookie-push.user.js` 定时把浏览器里的最新 Cookie 推送到本服务——服务器自动覆盖对应账号的 `auth.json`、清除“登录态失效”标记，并把新 Cookie 热注入正在运行的 Camoufox（活跃账号），无需重启服务或手动重贴。
+
+使用步骤：
+
+1. 安装篡改猴，新建脚本并粘贴 `userscripts/aistudio-cookie-push.user.js` 的内容。
+2. 把篡改猴的「允许脚本访问 Cookie」设为 **all**（管理面板 → 设置 → 配置模式选「高级」→ 安全栏 → All → 保存），否则读不到 HttpOnly 的会话 Cookie。
+3. 打开任一 AI Studio 页面，在篡改猴菜单里设置：
+   - 「⚙ 设置服务器地址」：例如 `http://192.168.1.10:8000`
+   - 「🔑 设置管理密码」：`AISTUDIO_WEB_PASSWORD` 的值（未启用密码则留空）
+   - 「⏱ 设置推送间隔」：默认 60 分钟
+4. 页面加载后自动推送一次，此后按间隔自动重推；右下角状态胶囊显示最近一次结果，点击可立即手动推送。
+
+服务端行为（`POST /api/accounts/push-cookies`）：
+
+- 按 `email`（或显式指定的 `account_id`）匹配账号；匹配不到时自动新建（名称使用邮箱）。
+- 同一 `cookie_id` 分组（粘贴导入时的同一份 Cookie 罐）下的账号整组刷新。
+- 推送成功会清除该账号的“登录态失效”标记，并立即用 `ListModels` 探测新 Cookie；探测失败会重新标记为失效。
+- 若推送的是当前活跃账号且浏览器在线，新 Cookie 会被热注入运行中的浏览器，避免后续回写用旧 Cookie 覆盖推送结果。
+- 缺少会话必需 Cookie（`SID` / `SAPISID` / `__Secure-*PSID`）的推送会被拒绝，并返回缺项清单与权限设置提示。
+
+> 提示：推送内容是完整的 Google 会话 Cookie，请确认服务器地址可信，并建议使用独立的测试账号。
 
 ---
 

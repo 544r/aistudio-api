@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -305,6 +306,123 @@ def parse_cookie_string(
         "origins": [],
     }
 
+
+# 会话必需 Cookie：缺签名票（SAPISID 系）与主会话票（__Secure-*PSID）时
+# 上游必然 401，推送/导入前就要拦下，避免用残缺 Cookie 覆盖可用凭证。
+SESSION_SIGNING_COOKIE_NAMES = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
+SESSION_SESSION_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-3PSID")
+
+_SAME_SITE_ALIASES = {
+    "no_restriction": "None",
+    "none": "None",
+    "lax": "Lax",
+    "strict": "Strict",
+}
+
+
+def is_google_cookie_domain(domain: str | None) -> bool:
+    """判断 Cookie 域是否属于 google.com（含所有子域，允许前导点）。"""
+    clean = str(domain or "").strip().lower().lstrip(".")
+    if not clean:
+        return False
+    return clean == "google.com" or clean.endswith(".google.com")
+
+
+def _as_cookie_bool(value: object, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _normalize_same_site(value: object) -> str | None:
+    if value is None:
+        return None
+    return _SAME_SITE_ALIASES.get(str(value).strip().lower())
+
+
+def build_storage_state_from_browser_cookies(
+    items: Iterable[dict[str, object]],
+    *,
+    discard_transient: bool = True,
+) -> dict[str, object]:
+    """把浏览器扩展（GM_cookie / Cookie-Editor）导出的 Cookie 列表归一化为 storage state。
+
+    与 `build_google_cookie_list` 的区别：这里保留浏览器里每个 Cookie 真实的
+    domain / path / expires / sameSite，而不是按名字猜目标域。因为推送来源是
+    真实浏览器的完整 Cookie 罐，按原样落盘再灌回 Camoufox 才能还原同一会话。
+    """
+    cookies: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        value = item.get("value")
+        if not name or value is None:
+            continue
+        domain = str(item.get("domain") or "").strip()
+        if not is_google_cookie_domain(domain):
+            continue
+        if discard_transient and (
+            name in DISCARDABLE_IMPORT_COOKIE_NAMES or name.startswith(("_ga", "_gcl"))
+        ):
+            continue
+        path = str(item.get("path") or "/").strip() or "/"
+        key = (name, domain.lower(), path)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        expires = item.get("expirationDate", item.get("expires"))
+        expires_val = -1.0
+        if isinstance(expires, (int, float)):
+            expires_val = float(expires)
+        elif isinstance(expires, str):
+            with contextlib.suppress(ValueError):
+                expires_val = float(expires)
+
+        cookie: dict[str, object] = {
+            "name": name,
+            "value": str(value),
+            "domain": domain,
+            "path": path,
+            "expires": expires_val,
+            "secure": _as_cookie_bool(item.get("secure"), default=True),
+            "httpOnly": _as_cookie_bool(
+                item.get("httpOnly"), default=name not in _AUTH_COOKIE_NAMES
+            ),
+        }
+        same_site = _normalize_same_site(item.get("sameSite"))
+        if same_site:
+            cookie["sameSite"] = same_site
+        cookies.append(cookie)
+
+    return {"cookies": cookies, "origins": []}
+
+
+def missing_session_cookies(names: Iterable[str]) -> list[str]:
+    """返回缺失的会话必需 Cookie 类别；空列表表示会话票齐全。"""
+    name_set = set(names)
+    missing: list[str] = []
+    if "SID" not in name_set:
+        missing.append("SID")
+    if not any(name in name_set for name in SESSION_SIGNING_COOKIE_NAMES):
+        missing.append("SAPISID")
+    if not any(name in name_set for name in SESSION_SESSION_COOKIE_NAMES):
+        missing.append("__Secure-1PSID")
+    return missing
+
+
 def parse_emails_from_ogs_html(
     html_text: str, default_auth_user: str = "0"
 ) -> dict[str, str]:
@@ -387,7 +505,6 @@ async def probe_account_email(
         if u_index in root_map:
             return root_map[u_index]
     return None
-
 
 
 async def probe_account_benefit_tier(
