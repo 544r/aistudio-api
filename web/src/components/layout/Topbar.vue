@@ -36,7 +36,7 @@ const authStore = useAuthStore()
       <div
         v-if="!authStore.authEnabled"
         class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200/70 text-[11px] font-medium text-amber-800"
-        title="服务端未设置 AISTUDIO_WEB_PASSWORD，当前处于免密公开访问模式"
+        title="当前未启用管理密码，控制台处于免密公开访问模式"
       >
         <ShieldAlert class="w-3.5 h-3.5 text-amber-600 shrink-0" />
         <span>免密模式</span>
@@ -44,7 +44,7 @@ const authStore = useAuthStore()
       <div
         v-else
         class="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200/70 text-[11px] font-medium text-emerald-800"
-        title="服务端已启用 AISTUDIO_WEB_PASSWORD 控制台鉴权"
+        title="管理控制台鉴权已启用"
       >
         <ShieldCheck class="w-3.5 h-3.5 text-emerald-600 shrink-0" />
         <span>鉴权已启用</span>
@@ -70,8 +70,8 @@ const authStore = useAuthStore()
         @click="emit('openTokenModal')"
       >
         <Key class="w-3.5 h-3.5 text-gray-500" />
-        <span class="hidden sm:inline">密码设置</span>
-        <span class="sm:hidden">密码</span>
+        <span class="hidden sm:inline">修改密码</span>
+        <span class="sm:hidden">改密</span>
       </button>
     </div>
   </header>

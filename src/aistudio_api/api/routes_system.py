@@ -247,10 +247,16 @@ class ConfigYamlUpdateRequest(BaseModel):
     yaml_content: str
 
 
+class ChangeWebPasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 @protected_router.get("/config")
 async def get_system_config() -> dict[str, object]:
     """获取系统运行配置与 config.yaml 内容。"""
     from aistudio_api.config import settings
+    from aistudio_api.infrastructure.auth.web_password import web_auth_enabled
     from aistudio_api.infrastructure.utils.logger import (
         get_dump_dir,
         get_log_level,
@@ -269,7 +275,7 @@ async def get_system_config() -> dict[str, object]:
         "browser_port": settings.browser_port,
         "browser_headless": settings.browser_headless,
         "proxy_configured": bool(settings.proxy_url),
-        "auth_enabled": settings.auth_enabled,
+        "auth_enabled": web_auth_enabled(),
         "timeout_stream": settings.timeout_stream,
         "yaml_content": yaml_content,
         "log_level": get_log_level(),
@@ -278,6 +284,42 @@ async def get_system_config() -> dict[str, object]:
         "dump_to_file": is_dump_to_file_enabled(),
         "dump_dir": str(get_dump_dir()),
     }
+
+
+@protected_router.put("/auth/password")
+async def update_web_password(
+    req: ChangeWebPasswordRequest,
+) -> dict[str, object]:
+    """修改管理控制台密码并立即生效（哈希持久化到数据目录）。"""
+    from aistudio_api.infrastructure.auth.web_password import (
+        PASSWORD_MIN_LENGTH,
+        set_web_password,
+        verify_web_password,
+        web_auth_enabled,
+    )
+
+    if not web_auth_enabled():
+        raise HTTPException(
+            400,
+            detail="当前未启用管理密码，请先配置 AISTUDIO_WEB_PASSWORD 后重启",
+        )
+
+    current_password = req.current_password.strip()
+    new_password = req.new_password.strip()
+    if not verify_web_password(current_password):
+        raise HTTPException(403, detail="当前管理密码不正确")
+    if new_password == current_password:
+        raise HTTPException(400, detail="新密码不能与当前密码相同")
+    if len(new_password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(400, detail=f"新密码至少需要 {PASSWORD_MIN_LENGTH} 个字符")
+
+    try:
+        set_web_password(new_password)
+    except Exception as e:
+        raise HTTPException(500, detail=f"保存新密码失败: {e}") from e
+
+    logger.info("管理控制台密码已更新")
+    return {"ok": True, "message": "管理密码已更新"}
 
 
 @protected_router.put("/config/yaml")

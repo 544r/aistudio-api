@@ -58,12 +58,16 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
 
   if (!response.ok) {
     if (response.status === 401) {
-      clearToken()
-      if (onUnauthorizedHandler) {
-        onUnauthorizedHandler()
-      } else if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-        const redirect = encodeURIComponent(window.location.pathname + window.location.search)
-        window.location.href = `/login?redirect=${redirect}`
+      // A password change can invalidate a request that was already in flight;
+      // do not clear a newer token that the user just saved.
+      if (getToken() === token) {
+        clearToken()
+        if (onUnauthorizedHandler) {
+          onUnauthorizedHandler()
+        } else if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+          const redirect = encodeURIComponent(window.location.pathname + window.location.search)
+          window.location.href = `/login?redirect=${redirect}`
+        }
       }
     }
 

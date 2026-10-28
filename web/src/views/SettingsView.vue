@@ -129,7 +129,7 @@ function handleLoggingSaved(res: UpdateLoggingConfigResponse) {
           </span>
         </div>
         <div class="text-[11px] text-gray-400 mt-1">
-          {{ config?.auth_enabled ? '已受 AISTUDIO_WEB_PASSWORD 保护' : '未配置 AISTUDIO_WEB_PASSWORD' }}
+          {{ config?.auth_enabled ? '管理密码已启用，可在顶部“修改密码”中即时更新' : '未启用管理密码' }}
         </div>
       </div>
     </div>

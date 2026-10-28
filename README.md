@@ -51,6 +51,7 @@
 | **多账号自动轮换** | 支持多账号管理与故障自动切换，按模型独立记录 429 配额，每日美西午夜自动重置 |
 | **运行状态持久化** | 模型调用量、Token 消耗统计 (`stats.json`) 以及账号 429 限额与冷却状态 (`rotator_state.json`) 自动落盘，容器/服务重启不丢失状态 |
 | **Cookie 自动回写** | 运行期间每 60 秒把受控浏览器中的最新 Cookie 回写账号 `auth.json`，切号前与退出前也会保存，避免重启后注入过期快照 |
+| **管理密码即时修改** | 控制台顶部“修改密码”校验当前密码后立即生效，无需重启容器；新密码以哈希形式保存到 `data/web_auth.json`，随数据卷持久化 |
 | **下游参数容错与丢弃** | 支持配置 `drop_unsupported_params` 自动过滤下游传入的非标准安全分类（如 `HARM_CATEGORY_CIVIC_INTEGRITY`）与不兼容工具，避免 400 阻断 |
 | **批量子账号探活** | 导入单个包含多个 Google 身份的 Cookie 后，自动递归探活子账号（`u/0`, `u/1`...）并分别建档 |
 | **内置搜索与工具** | 支持 Google Search 联网搜索、Google Maps、代码执行沙箱等官方扩展能力 |
@@ -192,7 +193,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
+  ghcr.io/544r/aistudio-api:latest
 ```
 
 使用 Docker Compose 启动：
@@ -214,7 +215,8 @@ docker compose up -d
 | 变量名 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | API 服务监听端口 |
-| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`） |
+| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web 控制台初始访问密码（亦可设置 `AISTUDIO_ADMIN_PASSWORD`）；登录后可在控制台即时修改 |
+| `AISTUDIO_WEB_AUTH_FILE` | string | `data/web_auth.json` | 运行期管理密码哈希文件；删除后重启会回退到 `AISTUDIO_WEB_PASSWORD` |
 | `AISTUDIO_PROXY` | string | `""` | 出口代理地址，支持 `http://`、`https://` 或 `socks5://` |
 | `AISTUDIO_DATA_DIR` | string | `data/` | 主数据持久化根目录（Docker 下为 `/app/data`） |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | 账号持久化凭据目录 |
@@ -430,7 +432,7 @@ if response.function_calls:
 - **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
 - **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
 - **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
-- **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫。
+- **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫；登录后可在顶部“修改密码”校验当前密码并即时生效，无需重启。新密码以哈希形式保存在 `data/web_auth.json`，随 `data` 卷持久化；删除该文件并重启可回退到环境变量密码。
 
 ---
 

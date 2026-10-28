@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import secrets
-
 from fastapi import HTTPException, Request
 
 from aistudio_api.config import settings
+from aistudio_api.infrastructure.auth.web_password import (
+    verify_web_password,
+    web_auth_enabled,
+)
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -45,17 +47,12 @@ def _extract_request_token(request: Request) -> str | None:
 
 
 def require_web_auth(request: Request) -> None:
-    """保护管理控制台路由 (通过环境变量 AISTUDIO_WEB_PASSWORD 配置密码)。"""
-    if not settings.auth_enabled:
+    """保护管理控制台路由（环境变量或运行期持久化密码）。"""
+    if not web_auth_enabled():
         return
 
     token = _extract_request_token(request)
-    if (
-        token
-        and settings.web_password
-        and settings.web_password.strip()
-        and secrets.compare_digest(token, settings.web_password)
-    ):
+    if token and verify_web_password(token):
         return
     client_ip = request.client.host if request.client else "unknown"
     logger.warning("管理控制台鉴权失败: 来自 %s 的密码无效", client_ip)
@@ -96,12 +93,7 @@ def require_api_key(request: Request) -> None:
         return
 
     # 匹配管理密码（管理员具备超级 API 访问权限）
-    if (
-        token
-        and settings.web_password
-        and settings.web_password.strip()
-        and secrets.compare_digest(token, settings.web_password)
-    ):
+    if token and verify_web_password(token):
         return
     client_ip = request.client.host if request.client else "unknown"
     logger.warning("API 鉴权失败: 来自 %s 的 API Key 无效", client_ip)

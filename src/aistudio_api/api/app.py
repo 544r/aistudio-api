@@ -369,9 +369,9 @@ if static_dir.is_dir():
 @app.get("/auth/check")
 async def auth_check():
     """检查认证状态，用于前端判断是否需要登录。"""
-    from aistudio_api.config import settings
+    from aistudio_api.infrastructure.auth.web_password import web_auth_enabled
 
-    return {"auth_enabled": settings.auth_enabled}
+    return {"auth_enabled": web_auth_enabled()}
 
 
 @app.middleware("http")

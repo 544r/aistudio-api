@@ -272,10 +272,5 @@ class Settings:
     dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))
     log_level: str = "INFO"
 
-    @property
-    def auth_enabled(self) -> bool:
-        """网页管理端鉴权是否开启。"""
-        return bool(self.web_password)
-
 
 settings = Settings()

@@ -50,6 +50,7 @@
 | **Multi-Account Rotation** | Manages multiple accounts with automatic failover, tracks 429 rate limits per model independently, and resets quotas at midnight Pacific Time |
 | **Runtime State Persistence** | Model usage statistics (`stats.json`) and account 429 cooldown & quota status (`rotator_state.json`) are automatically persisted to disk across restarts |
 | **Cookie Writeback** | Every 60 seconds the active browser's latest cookies are written back to the account's `auth.json`; also saved before account switches and on shutdown to avoid restarting with a stale snapshot |
+| **Instant Password Change** | The console's "Change Password" action verifies the current password and takes effect immediately without restarting; the new password is stored as a hash in `data/web_auth.json` and persists with the data volume |
 | **Downstream Parameter Fault Tolerance** | `drop_unsupported_params` automatically drops unsupported safety categories (e.g. `HARM_CATEGORY_CIVIC_INTEGRITY`) and tools to prevent 400 errors |
 | **Multi-Account Probing** | Extracts and verifies sub-accounts (`u/0`, `u/1`...) automatically when importing a multi-session Cookie |
 | **Built-in Tools** | Supports official tools such as Google Search, Google Maps, and Code Execution sandbox |
@@ -191,7 +192,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v aistudio-api-data:/app/data \
-  ghcr.io/deconstructedcube/aistudio-api:latest
+  ghcr.io/544r/aistudio-api:latest
 ```
 
 Or run with Docker Compose:
@@ -212,7 +213,8 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `AISTUDIO_PORT` | int | `8080` | HTTP service listening port |
-| `AISTUDIO_WEB_PASSWORD` | string | `""` | Web Console access password (also checks `AISTUDIO_ADMIN_PASSWORD`) |
+| `AISTUDIO_WEB_PASSWORD` | string | `""` | Initial Web Console password (also checks `AISTUDIO_ADMIN_PASSWORD`); can be changed from the console after login |
+| `AISTUDIO_WEB_AUTH_FILE` | string | `data/web_auth.json` | Persisted management-password hash; delete it and restart to fall back to `AISTUDIO_WEB_PASSWORD` |
 | `AISTUDIO_PROXY` | string | `""` | Outbound proxy URL (`http://`, `https://`, or `socks5://`) |
 | `AISTUDIO_DATA_DIR` | string | `data/` | Main data directory for persistent files (`/app/data` in Docker) |
 | `AISTUDIO_ACCOUNTS_DIR` | string | `data/accounts` | Directory for storing account credentials |
@@ -383,7 +385,7 @@ The service includes a built-in static Web Console served at `http://localhost:8
 - **Dashboard**: Real-time view of service health, per-model request stats, success rates, and rate-limit cooldown status.
 - **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits.
 - **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
-- **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`.
+- **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`. After logging in, use "Change Password" in the top bar to verify the current password and update it instantly without restarting. The new password is stored as a hash in `data/web_auth.json` and persists with the `data` volume; delete that file and restart to fall back to the environment password.
 
 ---
 

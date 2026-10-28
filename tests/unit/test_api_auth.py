@@ -6,6 +6,15 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from aistudio_api.api.dependencies import require_api_key, require_web_auth
 from aistudio_api.config import settings
+from aistudio_api.infrastructure.auth.web_password import clear_web_password_cache
+
+
+@pytest.fixture(autouse=True)
+def _isolate_web_password_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("AISTUDIO_WEB_AUTH_FILE", str(tmp_path / "web_auth.json"))
+    clear_web_password_cache()
+    yield
+    clear_web_password_cache()
 
 
 def _build_client() -> httpx.AsyncClient:

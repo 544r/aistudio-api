@@ -1,6 +1,6 @@
 services:
   aistudio-api:
-    image: ghcr.io/deconstructedcube/aistudio-api:latest
+    image: ghcr.io/544r/aistudio-api:latest
     container_name: aistudio-api
     restart: unless-stopped
     ports:
@@ -14,6 +14,7 @@ services:
       - AISTUDIO_ROTATOR_STATE_FILE=/app/data/rotator_state.json
       - AISTUDIO_CONFIG_FILE=/app/data/config.yaml
       - AISTUDIO_BROWSER_EXECUTABLE=/opt/cloakbrowser/chrome
+      - AISTUDIO_WEB_PASSWORD=${AISTUDIO_WEB_PASSWORD:-}
 
 volumes:
   aistudio-api-data:
