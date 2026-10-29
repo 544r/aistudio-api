@@ -29,9 +29,11 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        entryFileNames: 'assets/[name].js',
-        chunkFileNames: 'assets/[name].js',
-        assetFileNames: 'assets/[name].[ext]',
+        // 文件名带内容哈希：升级镜像后 index.html 引用新文件名，浏览器/代理
+        // 不可能继续命中旧资源（固定文件名曾导致控制台升级后界面不更新）
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
         manualChunks: {
           'vendor-vue': ['vue', 'vue-router', 'pinia'],
           'vendor-icons': ['lucide-vue-next'],
