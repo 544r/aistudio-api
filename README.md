@@ -440,7 +440,7 @@ if response.function_calls:
 系统内置静态打包的 Web 前端管理控制台（访问 `http://localhost:8080`）：
 
 - **仪表盘 (Dashboard)**：实时展示服务健康状况、各模型请求量、成功率及 429 冷却指标。
-- **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态。
+- **账号管理 (Accounts)**：支持 Cookie 单条与凭据包批量导入、自动探测多账号、手动切换当前活跃账号或重置冷却状态；提供「下载油猴脚本」按钮（对应 `/userscripts/aistudio-cookie-push.user.js`，无需登录即可获取）。
 - **系统设置 (Settings)**：在线编辑 `config.yaml`（支持配置 profiles 与 models 默认规则），保存后服务端即时热重载。
 - **运行日志 (Logs)**：实时查看服务端最近 500 条日志，支持暂停、手动刷新与一键清空；可列出、查看、单个删除或一键清理 `dumps/` 下的请求报文 JSON。健康检查与日志接口自身的轮询不会写入日志，避免刷屏。
 - **访问鉴权**：设置环境变量 `AISTUDIO_WEB_PASSWORD` 后自动开启登录鉴权守卫；登录后可在顶部“修改密码”校验当前密码并即时生效，无需重启。新密码以哈希形式保存在 `data/web_auth.json`，随 `data` 卷持久化；删除该文件并重启可回退到环境变量密码。
@@ -453,7 +453,7 @@ Cookie 导入后并不会“永久有效”：Google 会定时轮换并吊销旧
 
 使用步骤：
 
-1. 安装篡改猴，新建脚本并粘贴 `userscripts/aistudio-cookie-push.user.js` 的内容。
+1. 在管理后台「账号管理」点「下载油猴脚本」（或直接访问服务器地址 `/userscripts/aistudio-cookie-push.user.js`），在篡改猴中安装；也可以新建脚本粘贴仓库里的 `userscripts/aistudio-cookie-push.user.js`。
 2. 把篡改猴的「允许脚本访问 Cookie」设为 **all**（管理面板 → 设置 → 配置模式选「高级」→ 安全栏 → All → 保存），否则读不到 HttpOnly 的会话 Cookie。
 3. 打开任一 AI Studio 页面，在篡改猴菜单里设置：
    - 「⚙ 设置服务器地址」：例如 `http://192.168.1.10:8000`

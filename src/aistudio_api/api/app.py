@@ -490,6 +490,7 @@ async def spa_navigation_middleware(request: Request, call_next):
             "/auth",
             "/assets",
             "/static",
+            "/userscripts",
             "/health",
             "/stats",
             "/rotation",

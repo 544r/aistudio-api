@@ -88,6 +88,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code and default configuration template
 COPY src/ src/
+# 油猴脚本由 /userscripts/... 路由提供下载，需随镜像一起打包
+COPY userscripts/ userscripts/
 COPY main.py .
 COPY config.yaml /app/defaults/config.yaml
 COPY config.yaml /app/config.yaml

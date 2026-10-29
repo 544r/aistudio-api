@@ -392,7 +392,7 @@ if response.function_calls:
 The service includes a built-in static Web Console served at `http://localhost:8080`:
 
 - **Dashboard**: Real-time view of service health, per-model request stats, success rates, and rate-limit cooldown status.
-- **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits.
+- **Accounts**: Import Cookie credentials (single text or bundle files), auto-probe multiple accounts, switch the active account, or reset rate limits; also offers a "Download userscript" button (served at `/userscripts/aistudio-cookie-push.user.js` without authentication).
 - **Settings**: Online editor for `config.yaml` with instant hot-reloading on save.
 - **Logs**: Live view of the latest 500 server log entries with pause, refresh, and one-click clear; lists, opens, deletes, or clears all request-dump JSON files under `dumps/`. Health checks and the log endpoints' own polling are excluded to keep the view readable.
 - **Access Control**: Enable authentication by setting `AISTUDIO_WEB_PASSWORD`. After logging in, use "Change Password" in the top bar to verify the current password and update it instantly without restarting. The new password is stored as a hash in `data/web_auth.json` and persists with the `data` volume; delete that file and restart to fall back to the environment password.
@@ -405,7 +405,7 @@ Imported cookies are not permanent: Google rotates sessions and revokes stale on
 
 Setup:
 
-1. Install Tampermonkey, create a new script, and paste the contents of `userscripts/aistudio-cookie-push.user.js`.
+1. Click "Download userscript" on the console's Accounts page (or open `/userscripts/aistudio-cookie-push.user.js` on your server) and install it in your userscript manager; you can also create a new script and paste the repository's `userscripts/aistudio-cookie-push.user.js`.
 2. Set "Allow scripts to access cookies" to **all** in Tampermonkey (Settings → Advanced config mode → Security → All → Save); otherwise HttpOnly session cookies cannot be read.
 3. Open any AI Studio page and use the script menu:
    - "⚙ Set server address": e.g. `http://192.168.1.10:8000`

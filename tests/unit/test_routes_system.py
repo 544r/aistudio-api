@@ -33,6 +33,23 @@ async def test_auth_check_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_userscript_download_endpoint():
+    async with _client() as client:
+        resp = await client.get("/userscripts/aistudio-cookie-push.user.js")
+        assert resp.status_code == 200
+        assert "javascript" in resp.headers.get("content-type", "")
+        assert "==UserScript==" in resp.text
+
+        # 浏览器直接打开（Accept: text/html）也要返回脚本本身，不能被 SPA 中间件改写
+        nav = await client.get(
+            "/userscripts/aistudio-cookie-push.user.js",
+            headers={"Accept": "text/html,application/xhtml+xml"},
+        )
+        assert nav.status_code == 200
+        assert "==UserScript==" in nav.text
+
+
+@pytest.mark.asyncio
 async def test_spa_endpoints():
     import asyncio
 

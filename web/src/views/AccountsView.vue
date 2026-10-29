@@ -21,6 +21,7 @@ import {
   Check,
   AlertTriangle,
   ShieldCheck,
+  Download,
 } from 'lucide-vue-next'
 
 const accountsStore = useAccountsStore()
@@ -52,6 +53,15 @@ async function loadData() {
     accountsStore.fetchPresets(),
     accountsStore.fetchGroups(),
   ])
+}
+
+function downloadUserscript() {
+  const link = document.createElement('a')
+  link.href = '/userscripts/aistudio-cookie-push.user.js'
+  link.download = 'aistudio-cookie-push.user.js'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
 async function handleHealthCheck() {
@@ -183,6 +193,16 @@ async function handleDeletePreset(presetId: string, name: string) {
         >
           <ArrowRightLeft class="w-4 h-4" />
           <span>顺延切号</span>
+        </Button>
+
+        <Button
+          variant="outline"
+          size="md"
+          title="下载浏览器自动推送 Cookie 的油猴脚本（安装后定时把浏览器最新 Cookie 推送到本服务）"
+          @click="downloadUserscript"
+        >
+          <Download class="w-4 h-4" />
+          <span>下载油猴脚本</span>
         </Button>
 
         <Button

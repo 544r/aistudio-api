@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
@@ -76,7 +77,11 @@ def stats_response() -> StatsResponse:
                         m_daily = st.daily_models[clean_m]
                         quota = resolve_tier_quota(acc.tier, clean_m)
                         used_pct = round((m_daily.requests / max(1, quota)) * 100, 1)
-                        cd_rem = max(0, int(m_daily.cooldown_until - time.time())) if m_daily.cooldown_until > time.time() else 0
+                        cd_rem = (
+                            max(0, int(m_daily.cooldown_until - time.time()))
+                            if m_daily.cooldown_until > time.time()
+                            else 0
+                        )
                         breakdown.append(
                             AccountBreakdownItem(
                                 account_id=acc.id,
@@ -93,7 +98,9 @@ def stats_response() -> StatsResponse:
                                 today_reasoning_tokens=m_daily.reasoning_tokens,
                                 configured_quota=quota,
                                 quota_used_percent=used_pct,
-                                is_available=acc.enabled and cd_rem == 0 and not st.session_expired,
+                                is_available=acc.enabled
+                                and cd_rem == 0
+                                and not st.session_expired,
                                 cooldown_remaining=cd_rem,
                             )
                         )
@@ -118,6 +125,23 @@ def stats_response() -> StatsResponse:
 @public_router.get("/health", response_model=HealthResponse)
 async def health():
     return health_response()
+
+
+# 油猴脚本不含任何密钥，匿名可下载，方便脚本管理器直接安装/更新
+_USERSCRIPT_FILE = (
+    Path(__file__).resolve().parents[3] / "userscripts" / "aistudio-cookie-push.user.js"
+)
+
+
+@public_router.get("/userscripts/aistudio-cookie-push.user.js")
+async def download_cookie_pusher_userscript() -> FileResponse:
+    """下载浏览器 Cookie 自动推送油猴脚本。"""
+    if not _USERSCRIPT_FILE.is_file():
+        raise HTTPException(status_code=404, detail="脚本文件不存在")
+    return FileResponse(
+        path=str(_USERSCRIPT_FILE),
+        media_type="application/javascript",
+    )
 
 
 @protected_router.get("/stats", response_model=StatsResponse)
@@ -552,7 +576,9 @@ async def create_api_key(req: CreateApiKeyRequest) -> ApiKeyItemModel:
                 )
 
     if any(item.get("key") == new_key for item in new_list):
-        raise HTTPException(409, detail="该 API Key 已存在，请使用其他密钥或留空自动生成")
+        raise HTTPException(
+            409, detail="该 API Key 已存在，请使用其他密钥或留空自动生成"
+        )
 
     new_list.append({"name": name, "key": new_key, "created_at": created_at})
     parsed["api_keys"] = new_list
