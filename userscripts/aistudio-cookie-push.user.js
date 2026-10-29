@@ -701,7 +701,7 @@
         const el = ensureBadge();
         const colors = { idle: "#5c6bc0", ok: "#2e7d32", error: "#c62828", busy: "#1565c0" };
         el.style.background = colors[kind] || colors.idle;
-        const audioMark = audioKeepAliveActive() ? (keepAlive.blocked ? " · 🔇" : " · 🔊") : "";
+        const audioMark = audioKeepAliveActive() ? (keepAlive.blocked ? " · ⚠" : " · 🔊") : "";
         el.textContent = `AIStudio 推送 · ${text}${audioMark}`;
         el.title = audioKeepAliveActive()
             ? `点击立即推送 Cookie\n静音音频保活: ${audioKeepAliveLabel()}`
