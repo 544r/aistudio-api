@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.0.1
+// @version      1.0.2
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
 // @match        https://alkalimakersuite-pa.clients6.google.com/*
 // @run-at       document-idle
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js
+// @downloadURL  https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js
 // @grant        unsafeWindow
 // @grant        GM_cookie
 // @grant        GM_xmlhttpRequest
@@ -510,7 +512,7 @@
         if (!location.hostname.endsWith("aistudio.google.com")) return;
 
         setBadge("idle", cfg.server ? "准备推送" : "未配置服务器");
-        log(`脚本已加载 v1.0.1，服务器: ${cfg.server || "未配置"}`);
+        log(`脚本已加载 v1.0.2，服务器: ${cfg.server || "未配置"}`);
 
         if (!cfg.server) {
             log("⚠ 请先通过 篡改猴 菜单设置服务器地址（「⚙ 设置服务器地址」）");
