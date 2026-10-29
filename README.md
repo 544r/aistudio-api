@@ -470,6 +470,7 @@ Cookie 导入后并不会“永久有效”：Google 会定时轮换并吊销旧
 - 按 `email`（或显式指定的 `account_id`）匹配账号；匹配不到时自动新建（名称使用邮箱）。
 - 同一 `cookie_id` 分组（粘贴导入时的同一份 Cookie 罐）下的账号整组刷新。
 - 推送成功会清除该账号的“登录态失效”标记，并立即用 `ListModels` 探测新 Cookie；探测失败会重新标记为失效。
+- 如果账号当前等级是 `Free`，推送会同时用新 Cookie 探测 Google 的权益等级接口，识别到 Pro / Ultra / Plus 就自动更新，不需要再手动点「识别等级」；已经是付费等级的账号不会重复探测。
 - 若推送的是当前活跃账号且浏览器在线，新 Cookie 会被热注入运行中的浏览器，避免后续回写用旧 Cookie 覆盖推送结果。
 - 只硬性要求 `SID` 与 `SAPISID`（签名票）；`__Secure-*PSID` 在 Chrome 分区 Cookie 场景下可能读不到，此时推送会与账号现有 `auth.json` 合并（同名以新推送为准、旧 Cookie 保留），再由 `ListModels` 探活做最终判定。
 

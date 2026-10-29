@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from dataclasses import asdict
 from typing import TYPE_CHECKING
@@ -449,10 +450,51 @@ async def push_cookies(
             runtime_state.rotator.set_session_expired(acc.id, False)
 
     session_valid: bool | None = None
-    with contextlib.suppress(Exception):
-        session_valid = await probe_account_session(
-            probe_cookies, auth_user=target.auth_user or auth_user, timeout=6.0
+    detected_tier: str | None = None
+    target_auth_user = target.auth_user or auth_user
+    need_tier_probe = (target.tier or "Free") == "Free"
+
+    async def _probe_session() -> bool | None:
+        try:
+            return await probe_account_session(
+                probe_cookies, auth_user=target_auth_user, timeout=6.0
+            )
+        except Exception as exc:
+            log.debug("账号探活失败: %s", exc)
+            return None
+
+    async def _probe_tier() -> str | None:
+        try:
+            return await probe_account_benefit_tier(
+                probe_cookies, auth_user=target_auth_user
+            )
+        except Exception as exc:
+            log.debug("账号等级探测失败: %s", exc)
+            return None
+
+    if need_tier_probe and probe_cookies:
+        # 新推送/新建账号默认是 Free；这里与探活并行探测真实订阅等级，
+        # 避免每次推完还要去前端手动点「识别等级」。
+        session_valid, detected_tier = await asyncio.gather(
+            _probe_session(),
+            _probe_tier(),
         )
+    else:
+        session_valid = await _probe_session()
+
+    if (
+        detected_tier
+        and detected_tier != (target.tier or "Free")
+        and account_service.update_account_tier(target.id, detected_tier)
+    ):
+        log.info(
+            "推送自动更新账号订阅等级: %s (%s) -> %s",
+            target.name,
+            mask_email(target.email) if target.email else target.id,
+            detected_tier,
+        )
+        target = account_service.get_account(target.id) or target
+
     if session_valid is False and runtime_state.rotator is not None:
         for acc in updated_accounts:
             runtime_state.rotator.set_session_expired(acc.id, True)

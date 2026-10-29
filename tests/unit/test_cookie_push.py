@@ -65,6 +65,7 @@ def _account(
     auth_user: str = "0",
     cookie_id: str | None = "cookie_1",
     name: str = "Test Account",
+    tier: str = "Free",
 ) -> AccountMeta:
     return AccountMeta(
         id=account_id,
@@ -74,6 +75,7 @@ def _account(
         last_used=None,
         auth_user=auth_user,
         cookie_id=cookie_id,
+        tier=tier,
     )
 
 
@@ -110,9 +112,16 @@ def stub_probe(monkeypatch):
     async def fake_probe(_cookies, auth_user="0", *, timeout=8.0):
         return True
 
+    async def fake_tier(_cookies, auth_user="0"):
+        return "Free"
+
     monkeypatch.setattr(
         "aistudio_api.application.account_health.probe_account_session",
         fake_probe,
+    )
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_benefit_tier",
+        fake_tier,
     )
 
 
@@ -741,3 +750,55 @@ async def test_push_cookies_records_history_without_raw_values():
     assert cleared.status_code == 200
     assert cleared.json()["cleared"] == 2
     assert after.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_auto_detects_pro_tier(monkeypatch):
+    svc = _mock_service([_account()])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def fake_tier(_cookies, auth_user="0"):
+        return "Pro"
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_benefit_tier",
+        fake_tier,
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "email": "user@example.com"},
+        )
+
+    assert resp.status_code == 200
+    svc.update_account_tier.assert_called_once_with("acc_1", "Pro")
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_skips_tier_probe_for_paid_account(monkeypatch):
+    svc = _mock_service([_account(tier="Pro")])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+    calls = 0
+
+    async def fake_tier(_cookies, auth_user="0"):
+        nonlocal calls
+        calls += 1
+        return "Pro"
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_benefit_tier",
+        fake_tier,
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "email": "user@example.com"},
+        )
+
+    assert resp.status_code == 200
+    assert calls == 0
+    svc.update_account_tier.assert_not_called()

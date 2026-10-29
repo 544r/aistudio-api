@@ -422,6 +422,7 @@ Server behavior (`POST /api/accounts/push-cookies`):
 - Matches the account by `email` (or an explicit `account_id`); creates a new account when no match exists.
 - Accounts sharing the same `cookie_id` group (one cookie jar imported by paste) are refreshed together.
 - A successful push clears the account's "session expired" flag and immediately probes the new cookies with `ListModels`; a failed probe marks it expired again.
+- If the account is currently `Free`, the push also probes Google's benefit-tier endpoint with the new cookies and upgrades Pro / Ultra / Plus automatically, so no manual "Detect tier" click is needed; accounts already on a paid tier skip the extra probe.
 - When the pushed account is active and the browser is online, the new cookies are hot-injected into the running browser so a later write-back cannot overwrite them with the old jar.
 - Only `SID` and `SAPISID` (the signing cookie) are mandatory. `__Secure-*PSID` may be invisible to extensions in Chrome's partitioned-cookie scenario; the push is then merged with the account's existing `auth.json` (new values win, old cookies are kept) and `ListModels` makes the final call.
 
