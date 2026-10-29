@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.0.2
+// @version      1.0.3
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -283,12 +283,14 @@
         return finalCookies;
     }
 
+    // 硬性要求只有 SID 与签名票：没有 SAPISID 系 Cookie 就算不出 SAPISIDHASH。
+    // __Secure-*PSID 在 Chrome 分区 Cookie 场景下可能读不到，但会话仍然有效，
+    // 只作提示，交给服务端合并旧 Cookie 并用 ListModels 做最终判定。
     function missingSessionCookies(cookies) {
         const names = new Set(cookies.map((c) => c.name));
         const missing = [];
         if (!names.has("SID")) missing.push("SID");
         if (!REQUIRED_SIGNING.some((n) => names.has(n))) missing.push("SAPISID");
-        if (!REQUIRED_SESSION.some((n) => names.has(n))) missing.push("__Secure-1PSID");
         return missing;
     }
 
@@ -329,11 +331,18 @@
             const missing = missingSessionCookies(cookies);
             if (missing.length) {
                 log(
-                    `❌ 缺少会话必需 Cookie: ${missing.join(", ")}。` +
-                        "请把 篡改猴「允许脚本访问 Cookie」设为 all（设置 → 高级 → 安全栏）后刷新重试"
+                    `❌ 缺少会话必需 Cookie: ${missing.join(", ")}（已收集: ` +
+                        cookies.map((c) => c.name).join(", ") +
+                        "）。请把 篡改猴「允许脚本访问 Cookie」设为 all（设置 → 高级 → 安全栏）后刷新重试"
                 );
                 setBadge("error", `缺 Cookie: ${missing.join("/")}`);
                 return;
+            }
+            if (!REQUIRED_SESSION.some((n) => cookies.some((c) => c.name === n))) {
+                log(
+                    "⚠ 未收集到 __Secure-1PSID/3PSID（Chrome 分区 Cookie 常见），继续推送；" +
+                        "服务端会与账号现有 Cookie 合并并校验登录态"
+                );
             }
 
             const detectedEmail = detectEmail().toLowerCase();
@@ -512,7 +521,7 @@
         if (!location.hostname.endsWith("aistudio.google.com")) return;
 
         setBadge("idle", cfg.server ? "准备推送" : "未配置服务器");
-        log(`脚本已加载 v1.0.2，服务器: ${cfg.server || "未配置"}`);
+        log(`脚本已加载 v1.0.3，服务器: ${cfg.server || "未配置"}`);
 
         if (!cfg.server) {
             log("⚠ 请先通过 篡改猴 菜单设置服务器地址（「⚙ 设置服务器地址」）");

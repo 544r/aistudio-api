@@ -420,7 +420,7 @@ Server behavior (`POST /api/accounts/push-cookies`):
 - Accounts sharing the same `cookie_id` group (one cookie jar imported by paste) are refreshed together.
 - A successful push clears the account's "session expired" flag and immediately probes the new cookies with `ListModels`; a failed probe marks it expired again.
 - When the pushed account is active and the browser is online, the new cookies are hot-injected into the running browser so a later write-back cannot overwrite them with the old jar.
-- Pushes missing required session cookies (`SID` / `SAPISID` / `__Secure-*PSID`) are rejected with the list of missing names.
+- Only `SID` and `SAPISID` (the signing cookie) are mandatory. `__Secure-*PSID` may be invisible to extensions in Chrome's partitioned-cookie scenario; the push is then merged with the account's existing `auth.json` (new values win, old cookies are kept) and `ListModels` makes the final call.
 
 > Note: the payload contains full Google session cookies. Only point the script at a trusted server, and prefer a dedicated test account.
 

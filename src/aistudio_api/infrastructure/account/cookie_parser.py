@@ -307,8 +307,9 @@ def parse_cookie_string(
     }
 
 
-# 会话必需 Cookie：缺签名票（SAPISID 系）与主会话票（__Secure-*PSID）时
-# 上游必然 401，推送/导入前就要拦下，避免用残缺 Cookie 覆盖可用凭证。
+# 会话必需 Cookie：只有签名票（SAPISID 系）和 SID 是硬性要求——没有签名票
+# 根本算不出 SAPISIDHASH。`__Secure-*PSID` 只作提示：部分环境（Chrome 分区
+# Cookie）扩展 API 读不到它们，但会话本身仍然有效，不能据此拒绝推送。
 SESSION_SIGNING_COOKIE_NAMES = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
 SESSION_SESSION_COOKIE_NAMES = ("__Secure-1PSID", "__Secure-3PSID")
 
@@ -411,16 +412,65 @@ def build_storage_state_from_browser_cookies(
 
 
 def missing_session_cookies(names: Iterable[str]) -> list[str]:
-    """返回缺失的会话必需 Cookie 类别；空列表表示会话票齐全。"""
+    """返回缺失的会话必需 Cookie 类别；空列表表示可以尝试使用。
+
+    只硬性要求 SID 与签名票：没有 SAPISID 系 Cookie 就无法生成
+    SAPISIDHASH；`__Secure-*PSID` 缺失在部分环境是正常的（Chrome 分区
+    Cookie 不向扩展 API 暴露），由服务端 ListModels 探活做最终判定。
+    """
     name_set = set(names)
     missing: list[str] = []
     if "SID" not in name_set:
         missing.append("SID")
     if not any(name in name_set for name in SESSION_SIGNING_COOKIE_NAMES):
         missing.append("SAPISID")
-    if not any(name in name_set for name in SESSION_SESSION_COOKIE_NAMES):
-        missing.append("__Secure-1PSID")
     return missing
+
+
+def merge_storage_states(
+    base: dict[str, object] | None,
+    overlay: dict[str, object],
+) -> dict[str, object]:
+    """按 (name, domain, path) 合并两份 storage state，overlay 覆盖 base。
+
+    用途：浏览器扩展可能读不到分区 Cookie（如 __Secure-1PSID），推送时
+    与账号现有 auth.json 合并，避免把浏览器里看不见但依然有效的旧 Cookie
+    丢掉；overlay 中的同名 Cookie 总是以新推送的值为准。
+    """
+    merged: dict[tuple[str, str, str], dict[str, object]] = {}
+    origins: list[object] = []
+
+    if isinstance(base, dict):
+        base_cookies = base.get("cookies")
+        if isinstance(base_cookies, list):
+            for cookie in base_cookies:
+                if isinstance(cookie, dict) and cookie.get("name"):
+                    key = (
+                        str(cookie.get("name")),
+                        str(cookie.get("domain") or "").lower(),
+                        str(cookie.get("path") or "/"),
+                    )
+                    merged[key] = dict(cookie)
+        base_origins = base.get("origins")
+        if isinstance(base_origins, list):
+            origins = list(base_origins)
+
+    overlay_cookies = overlay.get("cookies")
+    if isinstance(overlay_cookies, list):
+        for cookie in overlay_cookies:
+            if isinstance(cookie, dict) and cookie.get("name"):
+                key = (
+                    str(cookie.get("name")),
+                    str(cookie.get("domain") or "").lower(),
+                    str(cookie.get("path") or "/"),
+                )
+                merged[key] = dict(cookie)
+
+    overlay_origins = overlay.get("origins")
+    if isinstance(overlay_origins, list) and overlay_origins:
+        origins = list(overlay_origins)
+
+    return {"cookies": list(merged.values()), "origins": origins}
 
 
 def parse_emails_from_ogs_html(

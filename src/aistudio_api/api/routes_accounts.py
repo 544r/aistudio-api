@@ -16,6 +16,7 @@ from aistudio_api.config import is_blocked_email
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
     build_storage_state_from_browser_cookies,
+    merge_storage_states,
     missing_session_cookies,
     parse_cookie_string,
     probe_account_benefit_tier,
@@ -258,6 +259,7 @@ async def push_cookies(
     Cookie 真实的 domain / path / expires；同一 cookie_id 分组的账号共享
     同一份 jar，推一次应整组刷新。
     """
+    import json
     import secrets
 
     from aistudio_api.application.account_health import probe_account_session
@@ -331,6 +333,7 @@ async def push_cookies(
         )
 
     created = target is None
+    merged_for_target: dict[str, object] = storage_state
     if target is None:
         target = account_service.save_account_from_cookies(
             name=email or f"浏览器推送 (u/{auth_user})",
@@ -347,11 +350,28 @@ async def push_cookies(
             if target.cookie_id and (a.cookie_id or "") == target.cookie_id
         ]
         updated_accounts = group or [target]
+        from pathlib import Path
+
         for acc in updated_accounts:
+            # 浏览器扩展读不到分区 Cookie（如 __Secure-1PSID）时，推送的罐
+            # 可能缺项；与账号现有 auth.json 合并，保留浏览器看不见但仍在
+            # 工作的旧 Cookie，新推送的同名 Cookie 优先。
+            existing_state: dict[str, object] | None = None
+            with contextlib.suppress(Exception):
+                acc_path = account_service.get_account_auth_path(acc.id)
+                if acc_path and Path(acc_path).is_file():
+                    raw_existing = json.loads(
+                        Path(acc_path).read_text(encoding="utf-8")
+                    )
+                    if isinstance(raw_existing, dict):
+                        existing_state = raw_existing
+            merged_state = merge_storage_states(existing_state, storage_state)
+            if acc.id == target.id:
+                merged_for_target = merged_state
             account_service.save_account_from_cookies(
                 name=acc.name,
                 email=acc.email,
-                storage_state=storage_state,
+                storage_state=merged_state,
                 account_id=acc.id,
                 auth_user=acc.auth_user or "0",
                 cookie_id=acc.cookie_id,
@@ -361,6 +381,15 @@ async def push_cookies(
                 notes=acc.notes or "",
             )
 
+    probe_cookies: dict[str, str] = {}
+    raw_merged = merged_for_target.get("cookies")
+    if isinstance(raw_merged, list):
+        for item in raw_merged:
+            if isinstance(item, dict) and item.get("name"):
+                probe_cookies.setdefault(
+                    str(item["name"]), str(item.get("value") or "")
+                )
+
     if runtime_state.rotator is not None:
         for acc in updated_accounts:
             runtime_state.rotator.set_session_expired(acc.id, False)
@@ -368,7 +397,7 @@ async def push_cookies(
     session_valid: bool | None = None
     with contextlib.suppress(Exception):
         session_valid = await probe_account_session(
-            cookie_dict, auth_user=target.auth_user or auth_user, timeout=6.0
+            probe_cookies, auth_user=target.auth_user or auth_user, timeout=6.0
         )
     if session_valid is False and runtime_state.rotator is not None:
         for acc in updated_accounts:

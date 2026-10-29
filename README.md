@@ -468,7 +468,7 @@ Cookie 导入后并不会“永久有效”：Google 会定时轮换并吊销旧
 - 同一 `cookie_id` 分组（粘贴导入时的同一份 Cookie 罐）下的账号整组刷新。
 - 推送成功会清除该账号的“登录态失效”标记，并立即用 `ListModels` 探测新 Cookie；探测失败会重新标记为失效。
 - 若推送的是当前活跃账号且浏览器在线，新 Cookie 会被热注入运行中的浏览器，避免后续回写用旧 Cookie 覆盖推送结果。
-- 缺少会话必需 Cookie（`SID` / `SAPISID` / `__Secure-*PSID`）的推送会被拒绝，并返回缺项清单与权限设置提示。
+- 只硬性要求 `SID` 与 `SAPISID`（签名票）；`__Secure-*PSID` 在 Chrome 分区 Cookie 场景下可能读不到，此时推送会与账号现有 `auth.json` 合并（同名以新推送为准、旧 Cookie 保留），再由 `ListModels` 探活做最终判定。
 
 > 提示：推送内容是完整的 Google 会话 Cookie，请确认服务器地址可信，并建议使用独立的测试账号。
 

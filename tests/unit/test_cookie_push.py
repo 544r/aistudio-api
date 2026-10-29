@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlencode
 
@@ -177,10 +178,12 @@ def test_build_storage_state_keeps_same_name_on_different_domains():
 
 def test_missing_session_cookies():
     assert missing_session_cookies(["SID", "SAPISID", "__Secure-1PSID"]) == []
+    # __Secure-*PSID 缺失在 Chrome 分区 Cookie 场景下是正常的，不再拒绝
+    assert missing_session_cookies(["SID", "SAPISID"]) == []
+    assert missing_session_cookies(["SID", "SAPISID", "__Secure-1PSIDTS"]) == []
     assert missing_session_cookies(["SAPISID", "__Secure-1PSID"]) == ["SID"]
     assert missing_session_cookies(["SID", "__Secure-1PSID"]) == ["SAPISID"]
-    assert missing_session_cookies(["SID", "SAPISID"]) == ["__Secure-1PSID"]
-    assert missing_session_cookies([]) == ["SID", "SAPISID", "__Secure-1PSID"]
+    assert missing_session_cookies([]) == ["SID", "SAPISID"]
 
 
 def test_dump_metadata_masks_credentials():
@@ -468,3 +471,79 @@ async def test_push_cookies_rejects_blocked_account_by_id(monkeypatch):
 
     assert resp.status_code == 403
     svc.save_account_from_cookies.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_accepts_jar_without_secure_psid():
+    """Chrome 分区 Cookie 场景下扩展读不到 __Secure-*PSID，不应拒绝推送。"""
+    target = _account()
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [
+        _cookie("SID", "sid-value"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("__Secure-1PSIDTS", "ts-value"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "email": "user@example.com"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_merges_missing_cookies_from_existing_auth(tmp_path):
+    """推送罐缺项时与现有 auth.json 合并：新值覆盖、旧值保留。"""
+    target = _account()
+    svc = _mock_service([target])
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "SID",
+                        "value": "old-sid",
+                        "domain": ".google.com",
+                        "path": "/",
+                        "expires": -1,
+                        "secure": True,
+                        "httpOnly": True,
+                    },
+                    {
+                        "name": "__Secure-1PSID",
+                        "value": "old-psid",
+                        "domain": ".google.com",
+                        "path": "/",
+                        "expires": -1,
+                        "secure": True,
+                        "httpOnly": True,
+                    },
+                ],
+                "origins": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    svc.get_account_auth_path.return_value = auth_file
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [_cookie("SID", "new-sid"), _cookie("SAPISID", "sapisid-value")]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["SID"] == "new-sid"
+    assert by_name["SAPISID"] == "sapisid-value"
+    assert by_name["__Secure-1PSID"] == "old-psid"
