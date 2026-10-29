@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.0.3
+// @version      1.1.0
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -31,6 +31,11 @@
  * 5. 之后保持本页（或任意 AI Studio 页）开着即可：页面加载后自动推一次，
  *    之后按设定间隔自动重推（默认 60 分钟）；右下角胶囊显示最近一次结果，
  *    点击胶囊立即手动推送。
+ * 6. 长期挂机可选两个保护（菜单里开关，默认关闭）：
+ *    · 「🔊 静音音频保活」：循环播放静音音轨，防止标签页被浏览器冻结/丢弃
+ *      （被丢弃后定时推送会一起停）；
+ *    · 「🔄 设置自动刷新间隔」：每 N 分钟在**标签页不可见时**整页刷新一次，
+ *      让页面重新发请求、轮换 Cookie，刷新后会自动再推送一次。
  *
  * 说明：
  * - 推送的是完整 Google 会话 Cookie 罐（含 SID / SAPISID / __Secure-*），
@@ -71,11 +76,17 @@
     const DEFAULT_INTERVAL_MIN = 60;
     const PUSH_TIMEOUT_MS = 30000;
     const INITIAL_PUSH_DELAY_MS = 5000;
+    // 自动刷新：默认关闭，最少 30 分钟一次
+    const DEFAULT_REFRESH_MIN = 0;
+    const MIN_REFRESH_MIN = 30;
 
     const STORE_SERVER = "ap_server";
     const STORE_PASSWORD = "ap_password";
     const STORE_INTERVAL = "ap_interval_min";
     const STORE_ALLOWED_EMAILS = "ap_allowed_emails";
+    const STORE_AUDIO_KEEPALIVE = "ap_audio_keepalive";
+    const STORE_REFRESH_MIN = "ap_refresh_min";
+    const STORE_LAST_REFRESH = "ap_last_refresh";
 
     // ==================== 配置 ====================
 
@@ -87,6 +98,8 @@
             .split(",")
             .map((s) => s.trim().toLowerCase())
             .filter((s) => s.includes("@")),
+        audioKeepAlive: GM_getValue(STORE_AUDIO_KEEPALIVE, false) === true,
+        refreshMin: Number(GM_getValue(STORE_REFRESH_MIN, DEFAULT_REFRESH_MIN)) || 0,
     };
 
     function normalizeServer(raw) {
@@ -147,16 +160,48 @@
         );
     }
 
+    function saveRefreshInterval() {
+        const input = prompt(
+            "自动刷新间隔（分钟，0 = 关闭，最小 30）。\n" +
+                "刷新只在标签页不可见时执行，用于让页面重新发请求、轮换 Cookie：",
+            String(cfg.refreshMin)
+        );
+        if (input === null) return;
+        const raw = parseInt(input, 10) || 0;
+        cfg.refreshMin = raw <= 0 ? 0 : Math.max(MIN_REFRESH_MIN, Math.min(24 * 60, raw));
+        GM_setValue(STORE_REFRESH_MIN, cfg.refreshMin);
+        log(
+            cfg.refreshMin
+                ? `✅ 自动刷新已设为每 ${cfg.refreshMin} 分钟（刷新页面后生效）`
+                : "✅ 已关闭自动刷新"
+        );
+    }
+
+    function toggleAudioKeepAlive() {
+        if (audioKeepAliveActive()) {
+            stopAudioKeepAlive();
+            GM_setValue(STORE_AUDIO_KEEPALIVE, false);
+            log("🔴 音频保活已关闭");
+            return;
+        }
+        const ok = startAudioKeepAlive();
+        GM_setValue(STORE_AUDIO_KEEPALIVE, ok);
+    }
+
     GM_registerMenuCommand("📤 立即推送 Cookie", () => pushNow("手动"));
     GM_registerMenuCommand("⚙ 设置服务器地址", saveServer);
     GM_registerMenuCommand("🔑 设置管理密码", savePassword);
     GM_registerMenuCommand("⏱ 设置推送间隔", saveInterval);
     GM_registerMenuCommand("✅ 设置允许推送的账号", saveAllowedEmails);
+    GM_registerMenuCommand("🔊 静音音频保活 开/关", toggleAudioKeepAlive);
+    GM_registerMenuCommand("🔄 设置自动刷新间隔", saveRefreshInterval);
     GM_registerMenuCommand("ℹ 查看状态", () => {
         alert(
             `服务器: ${cfg.server || "未配置"}\n` +
                 `间隔: ${cfg.intervalMin} 分钟\n` +
                 `账号限制: ${cfg.allowedEmails.length ? cfg.allowedEmails.join(", ") : "不限制"}\n` +
+                `音频保活: ${audioKeepAliveActive() ? "开启" : "关闭"}\n` +
+                `自动刷新: ${cfg.refreshMin ? `每 ${cfg.refreshMin} 分钟` : "关闭"}\n` +
                 `最近推送: ${state.lastPushText || "尚未推送"}\n` +
                 `最近结果: ${state.lastResult || "-"}`
         );
@@ -170,6 +215,7 @@
         lastPushText: "",
         lastResult: "",
         timer: null,
+        refreshTimer: null,
         fallbackTimer: null,
     };
 
@@ -466,17 +512,159 @@
         el.textContent = `AIStudio 推送 · ${text}`;
     }
 
+    // ==================== 音频保活 ====================
+
+    // 构造 1 秒全零采样的 WAV：循环播放时标签页始终处于"正在播放音频"状态，
+    // Chrome 不会冻结/丢弃它（标签页一旦被丢弃，定时推送也会跟着停摆）。
+    const keepAlive = { el: null, ctx: null, gestureBound: false };
+
+    function makeSilentWavUrl() {
+        const sampleRate = 8000;
+        const samples = sampleRate;
+        const buffer = new ArrayBuffer(44 + samples * 2);
+        const view = new DataView(buffer);
+        const writeStr = (offset, text) => {
+            for (let i = 0; i < text.length; i++) {
+                view.setUint8(offset + i, text.charCodeAt(i));
+            }
+        };
+        writeStr(0, "RIFF");
+        view.setUint32(4, 36 + samples * 2, true);
+        writeStr(8, "WAVE");
+        writeStr(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeStr(36, "data");
+        view.setUint32(40, samples * 2, true);
+        return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+    }
+
+    function audioKeepAliveActive() {
+        return !!(keepAlive.el || keepAlive.ctx);
+    }
+
+    function startAudioKeepAlive() {
+        if (audioKeepAliveActive()) return true;
+        try {
+            const el = document.createElement("audio");
+            el.src = makeSilentWavUrl();
+            el.loop = true;
+            el.volume = 0.01;
+            el.style.display = "none";
+            document.body.appendChild(el);
+            keepAlive.el = el;
+            log("✅ 音频保活已开启（静音循环）");
+            resumeKeepAliveAudio();
+            return true;
+        } catch (e) {
+            log(`❌ 音频保活开启失败: ${(e && e.message) || e}`);
+            return false;
+        }
+    }
+
+    function stopAudioKeepAlive() {
+        if (keepAlive.el) {
+            try {
+                keepAlive.el.pause();
+            } catch (_) {}
+            try {
+                keepAlive.el.remove();
+            } catch (_) {}
+            keepAlive.el = null;
+        }
+        if (keepAlive.ctx) {
+            try {
+                keepAlive.ctx.close();
+            } catch (_) {}
+            keepAlive.ctx = null;
+        }
+    }
+
+    // 自动播放策略会拦截"没有用户手势"的播放：静音轨道通常放行；仍被拦截时
+    // 退回 Web Audio 极低增益振荡器，并在首次点击/按键后自动补启。
+    function resumeKeepAliveAudio() {
+        const el = keepAlive.el;
+        if (!el) return;
+        const playing = el.play();
+        if (playing && typeof playing.catch === "function") {
+            playing.catch(() => {
+                startWebAudioKeepAlive();
+                armGestureRetry();
+            });
+        }
+    }
+
+    function startWebAudioKeepAlive() {
+        if (keepAlive.ctx) return;
+        try {
+            const Ctx = W.AudioContext || W.webkitAudioContext;
+            if (!Ctx) return;
+            const ctx = new Ctx();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            gain.gain.value = 0.0001; // -80dB，听不见但存在真实音频流
+            osc.frequency.value = 440;
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            keepAlive.ctx = ctx;
+            log("✅ 音频保活已切换为 Web Audio 静音振荡器");
+        } catch (e) {
+            log(`⚠ Web Audio 保活不可用: ${(e && e.message) || e}`);
+        }
+    }
+
+    function armGestureRetry() {
+        if (keepAlive.gestureBound) return;
+        keepAlive.gestureBound = true;
+        const retry = () => {
+            if (keepAlive.el) keepAlive.el.play().catch(() => {});
+            if (keepAlive.ctx && keepAlive.ctx.state === "suspended") {
+                keepAlive.ctx.resume().catch(() => {});
+            }
+        };
+        document.addEventListener("pointerdown", retry, { once: true });
+        document.addEventListener("keydown", retry, { once: true });
+        log(
+            "⚠ 音频保活被自动播放策略拦截：在页面点一下即可启用；" +
+                "长期挂机建议给浏览器加参数 --autoplay-policy=no-user-gesture-required"
+        );
+    }
+
     // ==================== 调度 ====================
 
     // 后台标签页的主线程定时器会被浏览器节流（隐藏几分钟后压到每分钟/每小时），
     // 这里把定时器放进 Worker 线程绕开节流；Worker 不可用时回退主线程。
     // AI Studio 启用了 Trusted Types，Worker 的 scriptURL 是 TrustedScriptURL
     // 槽位：依次尝试自建策略 → 页面 defaultPolicy → 直接传 URL，都不行回退。
-    function startWorkerTimer(intervalMs) {
+    // Trusted Types 策略只能注册一次：两个定时器共用同一个策略对象
+    let ttPolicy = null;
+
+    function trustedWorkerUrl(rawUrl) {
+        const tt = W.trustedTypes;
+        if (!tt || !tt.createPolicy) return rawUrl;
+        if (!ttPolicy) {
+            try {
+                ttPolicy = tt.createPolicy("aistudio-api-push", {
+                    createScriptURL: (s) => s,
+                });
+            } catch (_) {
+                ttPolicy = tt.defaultPolicy || null;
+            }
+        }
+        return ttPolicy ? ttPolicy.createScriptURL(rawUrl) : null;
+    }
+
+    function createWorkerTimer(intervalMs, onTick) {
         const fallbackToTimer = () => {
-            if (state.fallbackTimer) return;
-            state.fallbackTimer = setInterval(() => pushNow("定时"), intervalMs);
-            log(`已回退主线程定时器：每 ${Math.round(intervalMs / 60000)} 分钟推送一次`);
+            const timer = setInterval(onTick, intervalMs);
+            log(`已回退主线程定时器：每 ${Math.round(intervalMs / 60000)} 分钟`);
+            return timer;
         };
         try {
             const src =
@@ -484,31 +672,17 @@
                 intervalMs +
                 ");onmessage=(e)=>{if(e.data==='stop'){clearInterval(t);close()}};";
             const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-            let workerUrl = null;
-            const tt = W.trustedTypes;
-            if (tt && tt.createPolicy) {
-                try {
-                    workerUrl = tt
-                        .createPolicy("aistudio-api-push", { createScriptURL: (s) => s })
-                        .createScriptURL(url);
-                } catch (_) {
-                    if (tt.defaultPolicy) {
-                        workerUrl = tt.defaultPolicy.createScriptURL(url);
-                    }
-                }
-            } else {
-                workerUrl = url;
-            }
+            const workerUrl = trustedWorkerUrl(url);
             if (!workerUrl) throw new Error("Trusted Types 锁定，无法构造 Worker 脚本 URL");
             const worker = new Worker(workerUrl);
             worker.onmessage = (ev) => {
-                if (ev.data === "tick") pushNow("定时");
+                if (ev.data === "tick") onTick();
             };
             worker.onerror = () => {
                 log("⚠ Worker 定时器异常，回退主线程定时器");
                 fallbackToTimer();
             };
-            log(`已启动 Worker 定时器：每 ${Math.round(intervalMs / 60000)} 分钟推送一次`);
+            log(`已启动 Worker 定时器：每 ${Math.round(intervalMs / 60000)} 分钟`);
             return worker;
         } catch (e) {
             log(`⚠ Worker 定时器不可用（${(e && e.message) || e}），回退主线程定时器`);
@@ -517,11 +691,28 @@
         }
     }
 
+    // 定时刷新：让页面重新走一遍加载流程（真实请求 → Google 轮换 Cookie），
+    // 刷新后脚本会重新推送一次。只在标签页不可见时执行，避免打断正在使用的页面。
+    function maybeRefreshPage() {
+        if (!cfg.refreshMin) return;
+        if (location.hostname !== "aistudio.google.com") return;
+        if (document.visibilityState === "visible") return;
+        if (state.pushing) return;
+        const last = Number(GM_getValue(STORE_LAST_REFRESH, 0)) || 0;
+        const intervalMs = cfg.refreshMin * 60 * 1000;
+        if (last && Date.now() - last < intervalMs * 0.9) return;
+        GM_setValue(STORE_LAST_REFRESH, Date.now());
+        log(
+            `🔄 自动刷新页面轮换 Cookie（间隔 ${cfg.refreshMin} 分钟），刷新后会自动再推送一次`
+        );
+        setTimeout(() => location.reload(), 1500);
+    }
+
     function init() {
         if (!location.hostname.endsWith("aistudio.google.com")) return;
 
         setBadge("idle", cfg.server ? "准备推送" : "未配置服务器");
-        log(`脚本已加载 v1.0.3，服务器: ${cfg.server || "未配置"}`);
+        log(`脚本已加载 v1.1.0，服务器: ${cfg.server || "未配置"}`);
 
         if (!cfg.server) {
             log("⚠ 请先通过 篡改猴 菜单设置服务器地址（「⚙ 设置服务器地址」）");
@@ -529,7 +720,16 @@
             setTimeout(() => pushNow("页面加载"), INITIAL_PUSH_DELAY_MS);
         }
 
-        state.timer = startWorkerTimer(cfg.intervalMin * 60 * 1000);
+        state.timer = createWorkerTimer(cfg.intervalMin * 60 * 1000, () =>
+            pushNow("定时")
+        );
+        if (cfg.audioKeepAlive) startAudioKeepAlive();
+        if (cfg.refreshMin > 0) {
+            state.refreshTimer = createWorkerTimer(
+                cfg.refreshMin * 60 * 1000,
+                maybeRefreshPage
+            );
+        }
 
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState !== "visible") return;
