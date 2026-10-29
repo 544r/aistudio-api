@@ -154,6 +154,19 @@ class AccountService:
         """切换账号的启用/禁用状态。"""
         return self._store.toggle_account_enabled(account_id, enabled)
 
+    def disable_blocked_accounts(self) -> list[AccountMeta]:
+        """禁用邮箱命中 AISTUDIO_BLOCKED_EMAILS 的账号，返回本次新禁用的账号。"""
+        from aistudio_api.config import is_blocked_email
+
+        disabled: list[AccountMeta] = []
+        for acc in self.list_accounts():
+            if not acc.enabled or not is_blocked_email(acc.email):
+                continue
+            updated = self.toggle_account_enabled(acc.id, False)
+            if updated is not None:
+                disabled.append(updated)
+        return disabled
+
     def update_account_group(self, account_id: str, group: str) -> AccountMeta | None:
         """更新账号所属分组。"""
         return self._store.update_account_group(account_id, group)

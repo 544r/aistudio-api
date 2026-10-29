@@ -410,3 +410,61 @@ async def test_push_cookies_marks_session_invalid_when_probe_fails(monkeypatch):
     assert data["session_valid"] is False
     runtime_state.rotator.set_session_expired.assert_any_call("acc_1", False)
     runtime_state.rotator.set_session_expired.assert_any_call("acc_1", True)
+
+
+# ==================== 禁用名单（主号保护） ====================
+
+
+def test_disable_blocked_accounts_disables_matching(monkeypatch):
+    from aistudio_api.application.account_service import AccountService as Service
+    from aistudio_api.config import settings
+
+    monkeypatch.setattr(settings, "blocked_emails", frozenset({"main@example.com"}))
+    main = _account("acc_main", email="main@example.com", name="Main")
+    alt = _account("acc_alt", email="alt@example.com", name="Alt")
+    store = MagicMock()
+    store.list_accounts.return_value = [main, alt]
+    store.toggle_account_enabled.return_value = main
+
+    disabled = Service(store).disable_blocked_accounts()
+
+    assert [a.id for a in disabled] == ["acc_main"]
+    store.toggle_account_enabled.assert_called_once_with("acc_main", False)
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_rejects_blocked_email(monkeypatch):
+    from aistudio_api.config import settings
+
+    monkeypatch.setattr(settings, "blocked_emails", frozenset({"user@example.com"}))
+    svc = _mock_service([_account()])
+    runtime_state.account_service = svc
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "email": "User@Example.com"},
+        )
+
+    assert resp.status_code == 403
+    assert "AISTUDIO_BLOCKED_EMAILS" in resp.json()["error"]["message"]
+    svc.save_account_from_cookies.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_rejects_blocked_account_by_id(monkeypatch):
+    from aistudio_api.config import settings
+
+    monkeypatch.setattr(settings, "blocked_emails", frozenset({"user@example.com"}))
+    target = _account()  # 账号本身就在禁用名单里
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 403
+    svc.save_account_from_cookies.assert_not_called()

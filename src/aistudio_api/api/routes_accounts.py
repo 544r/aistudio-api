@@ -12,6 +12,7 @@ from aistudio_api.api.dependencies import (
     get_account_service,
     get_runtime_state,
 )
+from aistudio_api.config import is_blocked_email
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
     build_storage_state_from_browser_cookies,
@@ -318,6 +319,16 @@ async def push_cookies(
                         a for a in matches if (a.auth_user or "0") == auth_user
                     ]
                     target = (same_user or matches)[0]
+
+    effective_email = email or (target.email if target is not None else None)
+    if is_blocked_email(effective_email):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"账号 {mask_email(effective_email or '')} 在禁用名单"
+                "（AISTUDIO_BLOCKED_EMAILS）中，已拒绝推送"
+            ),
+        )
 
     created = target is None
     if target is None:
@@ -891,6 +902,14 @@ async def import_cookies(
                         if probed and probed != "Free":
                             detected_tier = probed
     detected_tier = detected_tier or "Free"
+    if is_blocked_email(detected_email):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"账号 {mask_email(detected_email or '')} 在禁用名单"
+                "（AISTUDIO_BLOCKED_EMAILS）中，已拒绝导入"
+            ),
+        )
     account = account_service.save_account_from_cookies(
         name=name,
         email=detected_email,
@@ -942,6 +961,20 @@ async def probe_and_import(
     probed = await probe_google_accounts_infinite(req.cookies)
     if not probed:
         raise HTTPException(status_code=400, detail="未探测到有效已登录 Google 账号")
+
+    # 多账号 Cookie 罐会一次探出全部子账号；禁用名单里的（如主号）直接剔除
+    blocked = [p for p in probed if is_blocked_email(str(p.get("email") or ""))]
+    if blocked:
+        log.info(
+            "跳过禁用名单中的账号: %s",
+            ", ".join(mask_email(str(p.get("email") or "")) for p in blocked),
+        )
+        probed = [p for p in probed if not is_blocked_email(str(p.get("email") or ""))]
+        if not probed:
+            raise HTTPException(
+                status_code=400,
+                detail="探测到的账号全部在禁用名单（AISTUDIO_BLOCKED_EMAILS）中",
+            )
 
     storage_state = parse_cookie_string(req.cookies)
     prefix = req.name_prefix.strip() if req.name_prefix else "Google Account"
@@ -1082,6 +1115,9 @@ async def import_bundle(
                             if probed and probed != "Free":
                                 acc_tier = probed
         acc_tier = acc_tier or "Free"
+        if is_blocked_email(acc_email):
+            log.info("跳过禁用名单中的账号: %s", mask_email(acc_email or ""))
+            continue
         cid = f"cookie_{secrets.token_hex(4)}"
 
         account = account_service.save_account_from_cookies(

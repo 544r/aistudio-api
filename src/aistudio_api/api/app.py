@@ -167,6 +167,17 @@ async def lifespan(_app: FastAPI):
         )
 
         await asyncio.sleep(30)
+        # 禁用名单（AISTUDIO_BLOCKED_EMAILS）中的账号一律停用，避免主号被调度
+        try:
+            disabled = account_service.disable_blocked_accounts()
+            if disabled:
+                logger.warning(
+                    "已自动停用 %d 个禁用名单中的账号: %s",
+                    len(disabled),
+                    ", ".join(a.name for a in disabled),
+                )
+        except Exception as exc:
+            logger.error("执行禁用名单检查失败: %s", exc)
         last_health = 0.0
         last_keepalive = time.monotonic()
         while True:

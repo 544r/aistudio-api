@@ -239,6 +239,7 @@ Open `http://localhost:8080` in your browser to access the Web Console.
 | `AISTUDIO_DUMP_DIR` | string | `dumps/` | Target directory for dumped exchange files |
 | `AISTUDIO_ACCOUNT_HEALTH_INTERVAL` | int | `600` | Seconds between proactive account session checks; `0` disables. A 401 from `ListModels` marks the account expired |
 | `AISTUDIO_SESSION_KEEPALIVE_INTERVAL` | int | `1800` | Seconds between idle session keepalives; reloads AI Studio to rotate cookies. `0` disables |
+| `AISTUDIO_BLOCKED_EMAILS` | string | empty | Blocked emails (comma-separated). Accounts with these emails are never imported/pushed and are disabled at startup; use it to exclude your primary account from a multi-account cookie jar |
 
 > [!IMPORTANT]
 > Cookie-imported accounts have no OAuth refresh token. If Google has already revoked the session (password change, risk control, device session cleanup, etc.), no keepalive can renew it server-side; re-importing cookies is the only recovery. Health checks and keepalives reduce expiry probability and make expired accounts visible in the console before an API call fails.
@@ -422,6 +423,15 @@ Server behavior (`POST /api/accounts/push-cookies`):
 - Pushes missing required session cookies (`SID` / `SAPISID` / `__Secure-*PSID`) are rejected with the list of missing names.
 
 > Note: the payload contains full Google session cookies. Only point the script at a trusted server, and prefer a dedicated test account.
+
+### Multi-Account Browsers and Primary-Account Protection
+
+One cookie jar can be signed in to several Google accounts (`/u/0/`, `/u/1/`, …); the server distinguishes them by the `auth_user` index. If the browser also has a **primary account you never want to use**, either of these two layers is enough to guarantee it is not used:
+
+1. **Server-side blocklist (hard guarantee)**: put the primary account's email in `AISTUDIO_BLOCKED_EMAILS` (comma-separated). Imports, probe-imports, bundle imports, and userscript pushes then reject/skip that email, and any existing account with that email is disabled automatically at startup (the rotator only selects enabled accounts).
+2. **Userscript allowlist (source-side guard)**: in the script menu choose "✅ Set allowed accounts" and fill in the emails allowed to push. If the current page is on the primary account (typically the default `/u/0/` page), automatic pushes are skipped and the status pill says so; if the email cannot be detected the push is also skipped rather than guessed.
+
+The two layers are independent: the server blocklist protects against any client, while the script allowlist avoids useless pushes and reduces how often cookies leave the browser.
 
 ---
 

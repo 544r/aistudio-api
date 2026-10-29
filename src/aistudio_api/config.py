@@ -44,6 +44,16 @@ def _load_int_env(*names: str, default: int) -> int:
     return int(value)
 
 
+def _load_email_set_env(*names: str) -> frozenset[str]:
+    """读取逗号/分号分隔的邮箱列表环境变量（统一小写，忽略无效项）。"""
+    value = _load_env(*names)
+    if not value:
+        return frozenset()
+    items = value.replace(";", ",").replace("\n", ",").split(",")
+    emails = {item.strip().lower() for item in items if "@" in item and item.strip()}
+    return frozenset(emails)
+
+
 def _load_web_password() -> str | None:
     return os.getenv("AISTUDIO_WEB_PASSWORD") or os.getenv("AISTUDIO_ADMIN_PASSWORD")
 
@@ -275,6 +285,8 @@ class Settings:
     session_keepalive_interval: int = _load_int_env(
         "AISTUDIO_SESSION_KEEPALIVE_INTERVAL", default=1800
     )
+    # 多账号 Cookie 罐里不希望被导入/调度使用的账号邮箱（如主号），逗号分隔
+    blocked_emails: frozenset[str] = _load_email_set_env("AISTUDIO_BLOCKED_EMAILS")
     dump_requests: bool = _load_dump_requests_env()
     dump_to_file: bool = _load_dump_to_file_env()
     dump_dir: str = os.getenv("AISTUDIO_DUMP_DIR", str(_PROJECT_ROOT / "dumps"))
@@ -282,3 +294,10 @@ class Settings:
 
 
 settings = Settings()
+
+
+def is_blocked_email(email: str | None) -> bool:
+    """判断邮箱是否命中禁用名单 AISTUDIO_BLOCKED_EMAILS（大小写不敏感）。"""
+    if not email or not settings.blocked_emails:
+        return False
+    return email.strip().lower() in settings.blocked_emails

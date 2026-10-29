@@ -24,7 +24,9 @@
  * 2. 篡改猴 需把「允许脚本访问 Cookie」设为 all，否则读不到 HttpOnly 的
  *    会话 Cookie：管理面板 → 设置 → 配置模式选「高级」→ 安全栏 → 设为 all → 保存。
  * 3. 首次推送时 篡改猴 会弹出"连接到 xxx"的授权框，选「总是允许」。
- * 4. 之后保持本页（或任意 AI Studio 页）开着即可：页面加载后自动推一次，
+ * 4. 多账号浏览器建议点「✅ 设置允许推送的账号」，填入小号邮箱：停在主号
+ *    页面（常见于默认的 /u/0/）时自动推送会直接跳过，不会把主号传上去。
+ * 5. 之后保持本页（或任意 AI Studio 页）开着即可：页面加载后自动推一次，
  *    之后按设定间隔自动重推（默认 60 分钟）；右下角胶囊显示最近一次结果，
  *    点击胶囊立即手动推送。
  *
@@ -71,6 +73,7 @@
     const STORE_SERVER = "ap_server";
     const STORE_PASSWORD = "ap_password";
     const STORE_INTERVAL = "ap_interval_min";
+    const STORE_ALLOWED_EMAILS = "ap_allowed_emails";
 
     // ==================== 配置 ====================
 
@@ -78,6 +81,10 @@
         server: String(GM_getValue(STORE_SERVER, "") || "").trim(),
         password: String(GM_getValue(STORE_PASSWORD, "") || ""),
         intervalMin: Number(GM_getValue(STORE_INTERVAL, DEFAULT_INTERVAL_MIN)) || DEFAULT_INTERVAL_MIN,
+        allowedEmails: String(GM_getValue(STORE_ALLOWED_EMAILS, "") || "")
+            .split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter((s) => s.includes("@")),
     };
 
     function normalizeServer(raw) {
@@ -119,14 +126,35 @@
         log(`✅ 推送间隔已设为 ${val} 分钟（刷新页面后生效）`);
     }
 
+    function saveAllowedEmails() {
+        const input = prompt(
+            "只允许推送这些账号（逗号分隔的邮箱；留空 = 不限制）。\n" +
+                "多账号浏览器建议填小号邮箱，防止在主号页面误推：",
+            cfg.allowedEmails.join(", ")
+        );
+        if (input === null) return;
+        cfg.allowedEmails = input
+            .split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter((s) => s.includes("@"));
+        GM_setValue(STORE_ALLOWED_EMAILS, cfg.allowedEmails.join(","));
+        log(
+            cfg.allowedEmails.length
+                ? `✅ 仅推送这些账号: ${cfg.allowedEmails.join(", ")}`
+                : "✅ 已取消账号限制（任意账号都会推送）"
+        );
+    }
+
     GM_registerMenuCommand("📤 立即推送 Cookie", () => pushNow("手动"));
     GM_registerMenuCommand("⚙ 设置服务器地址", saveServer);
     GM_registerMenuCommand("🔑 设置管理密码", savePassword);
     GM_registerMenuCommand("⏱ 设置推送间隔", saveInterval);
+    GM_registerMenuCommand("✅ 设置允许推送的账号", saveAllowedEmails);
     GM_registerMenuCommand("ℹ 查看状态", () => {
         alert(
             `服务器: ${cfg.server || "未配置"}\n` +
                 `间隔: ${cfg.intervalMin} 分钟\n` +
+                `账号限制: ${cfg.allowedEmails.length ? cfg.allowedEmails.join(", ") : "不限制"}\n` +
                 `最近推送: ${state.lastPushText || "尚未推送"}\n` +
                 `最近结果: ${state.lastResult || "-"}`
         );
@@ -306,10 +334,30 @@
                 return;
             }
 
+            const detectedEmail = detectEmail().toLowerCase();
+            // 账号白名单：填了就只推白名单里的账号。多账号浏览器里主号常是
+            // 默认页（/u/0/），一旦忘记切换页面自动推送就会把主号也传上去，
+            // 这里从源头拦住；识别不到邮箱时宁可跳过（fail closed）。
+            if (cfg.allowedEmails.length) {
+                if (!detectedEmail) {
+                    log(
+                        "⚠ 无法识别当前页面账号邮箱，白名单模式下已跳过本次推送。" +
+                            "请在该账号的 AI Studio 页面手动点「立即推送」，或清空白名单"
+                    );
+                    setBadge("error", "无法识别账号，已跳过");
+                    return;
+                }
+                if (!cfg.allowedEmails.includes(detectedEmail)) {
+                    log(`⚠ 当前账号 ${detectedEmail} 不在白名单内，已跳过推送`);
+                    setBadge("error", "账号不在白名单");
+                    return;
+                }
+            }
+
             const payload = {
                 cookies,
                 auth_user: accountPathPrefix(),
-                email: detectEmail() || undefined,
+                email: detectedEmail || undefined,
                 source: "userscript",
             };
             const headers = { "Content-Type": "application/json" };
