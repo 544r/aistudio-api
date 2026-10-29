@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path as FastApiPath
@@ -177,6 +178,47 @@ class PushCookiesResponse(BaseModel):
     injected: bool = False
 
 
+class CookiePushChangeResponse(BaseModel):
+    name: str
+    domain: str
+    path: str
+    category: str
+    kind: str
+    before: str | None = None
+    after: str | None = None
+
+
+class CookiePushEventResponse(BaseModel):
+    seq: int
+    at: float
+    account_id: str
+    name: str
+    email: str | None = None
+    auth_user: str
+    source: str | None = None
+    received_count: int
+    cookie_count: int
+    fingerprint: str
+    merged_fingerprint: str
+    previous_fingerprint: str | None = None
+    first: bool
+    changed: bool
+    merged_changed: bool
+    changes: list[CookiePushChangeResponse]
+    missing_advisory: list[str]
+    merged_missing_advisory: list[str]
+    session_valid: bool | None = None
+    injected: bool
+    created: bool
+    updated_accounts: int
+
+
+class CookiePushHistoryResponse(BaseModel):
+    entries: list[CookiePushEventResponse]
+    total: int
+    capacity: int
+
+
 class ProbeAndImportRequest(BaseModel):
     cookies: str
     name_prefix: str | None = None
@@ -274,12 +316,17 @@ async def push_cookies(
         else []
     )
     if not cookie_list:
+        log.warning("拒绝浏览器 Cookie 推送: 未解析到有效的 Google Cookie")
         raise HTTPException(status_code=400, detail="未解析到有效的 Google Cookie")
 
     missing = missing_session_cookies(
         str(item.get("name") or "") for item in cookie_list
     )
     if missing:
+        log.warning(
+            "拒绝浏览器 Cookie 推送: 缺少会话必需 Cookie %s",
+            ", ".join(missing),
+        )
         raise HTTPException(
             status_code=400,
             detail=(
@@ -304,6 +351,7 @@ async def push_cookies(
     if req.account_id:
         target = account_service.get_account(req.account_id)
         if target is None:
+            log.warning("拒绝浏览器 Cookie 推送: 指定的账号不存在 (%s)", req.account_id)
             raise HTTPException(status_code=404, detail="指定的账号不存在")
     elif email:
         matches = [a for a in accounts if (a.email or "").lower() == email]
@@ -324,6 +372,10 @@ async def push_cookies(
 
     effective_email = email or (target.email if target is not None else None)
     if is_blocked_email(effective_email):
+        log.warning(
+            "拒绝浏览器 Cookie 推送: 账号 %s 在禁用名单",
+            mask_email(effective_email or ""),
+        )
         raise HTTPException(
             status_code=403,
             detail=(
@@ -382,10 +434,12 @@ async def push_cookies(
             )
 
     probe_cookies: dict[str, str] = {}
+    merged_cookie_list: list[dict[str, object]] = []
     raw_merged = merged_for_target.get("cookies")
     if isinstance(raw_merged, list):
-        for item in raw_merged:
-            if isinstance(item, dict) and item.get("name"):
+        merged_cookie_list = [item for item in raw_merged if isinstance(item, dict)]
+        for item in merged_cookie_list:
+            if item.get("name"):
                 probe_cookies.setdefault(
                     str(item["name"]), str(item.get("value") or "")
                 )
@@ -421,9 +475,30 @@ async def push_cookies(
         except Exception as exc:
             log.warning("向浏览器热注入推送 Cookie 失败: %s", exc)
 
+    target = account_service.get_account(target.id) or target
+    push_event = None
+    try:
+        push_event = runtime_state.cookie_push_history.record(
+            account_id=target.id,
+            name=target.name,
+            email=mask_email(target.email) if target.email else None,
+            auth_user=target.auth_user or auth_user,
+            source=req.source or None,
+            raw_cookies=cookie_list,
+            merged_cookies=merged_cookie_list,
+            received_count=len(req.cookies),
+            session_valid=session_valid,
+            injected=injected,
+            created=created,
+            updated_accounts=len(updated_accounts),
+        )
+    except Exception as exc:
+        log.debug("记录 Cookie 推送历史失败: %s", exc)
+
     log.info(
         "收到浏览器 Cookie 推送: account=%s, email=%s, cookies=%d, updated=%d, "
-        "created=%s, injected=%s, session_valid=%s, source=%s",
+        "created=%s, injected=%s, session_valid=%s, source=%s, "
+        "fingerprint=%s, diff=%d",
         target.name,
         mask_email(target.email) if target.email else "-",
         len(cookie_list),
@@ -432,8 +507,9 @@ async def push_cookies(
         injected,
         session_valid,
         req.source or "-",
+        push_event.fingerprint if push_event is not None else "-",
+        len(push_event.changes) if push_event is not None else 0,
     )
-    target = account_service.get_account(target.id) or target
     return PushCookiesResponse(
         account_id=target.id,
         name=target.name,
@@ -444,6 +520,33 @@ async def push_cookies(
         session_valid=session_valid,
         injected=injected,
     )
+
+
+@router.get("/push-history", response_model=CookiePushHistoryResponse)
+async def get_cookie_push_history(
+    limit: int = 100,
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> CookiePushHistoryResponse:
+    """返回最近的浏览器 Cookie 推送记录（不含 Cookie 明文）。"""
+    history = runtime_state.cookie_push_history
+    capped = max(1, min(limit, history.capacity))
+    entries = [
+        CookiePushEventResponse(**asdict(event))
+        for event in history.recent(limit=capped)
+    ]
+    return CookiePushHistoryResponse(
+        entries=entries,
+        total=history.total,
+        capacity=history.capacity,
+    )
+
+
+@router.delete("/push-history")
+async def clear_cookie_push_history(
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> dict[str, object]:
+    """清空 Cookie 推送记录（只影响展示，不影响账号 Cookie）。"""
+    return {"ok": True, "cleared": runtime_state.cookie_push_history.clear()}
 
 
 @router.post("/{account_id}/activate", response_model=AccountResponse)

@@ -12,6 +12,7 @@ import type {
   SnapshotPresetRequest,
   ApplyPresetResponse,
   AccountHealthCheckResponse,
+  CookiePushHistoryResponse,
 } from '@/types'
 
 export const accountsApi = {
@@ -142,6 +143,18 @@ export const accountsApi = {
   applyPreset(id: string): Promise<ApplyPresetResponse> {
     return request<ApplyPresetResponse>(`/api/accounts/presets/${encodeURIComponent(id)}/apply`, {
       method: 'POST',
+    })
+  },
+
+  getPushHistory(limit = 100): Promise<CookiePushHistoryResponse> {
+    return request<CookiePushHistoryResponse>(
+      `/api/accounts/push-history?limit=${limit}`,
+    )
+  },
+
+  clearPushHistory(): Promise<{ ok: boolean; cleared: number }> {
+    return request<{ ok: boolean; cleared: number }>('/api/accounts/push-history', {
+      method: 'DELETE',
     })
   },
 }

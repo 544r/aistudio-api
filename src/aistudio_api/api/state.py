@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from aistudio_api.application.cookie_push_history import CookiePushHistory
 from aistudio_api.config import resolve_stats_file, settings
 from aistudio_api.infrastructure.utils.common import atomic_write_json
 
@@ -35,6 +36,7 @@ class ModelStatsItem:
     finish_reasons: dict[str, int] = field(default_factory=dict)
     last_used: str | None = None
 
+
 @dataclass
 class RuntimeState:
     client: AIStudioClient | None = None
@@ -44,6 +46,7 @@ class RuntimeState:
     model_stats: dict[str, ModelStatsItem] = field(
         default_factory=lambda: defaultdict(ModelStatsItem)
     )
+    cookie_push_history: CookiePushHistory = field(default_factory=CookiePushHistory)
     _last_saved_time: float = field(default=0.0, repr=False)
     _save_task: object | None = field(default=None, repr=False)
 
@@ -171,5 +174,6 @@ class RuntimeState:
             self.save_stats()
         else:
             self._schedule_debounced_save()
+
 
 runtime_state = RuntimeState()

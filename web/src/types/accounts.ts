@@ -112,3 +112,44 @@ export interface ImportBundleResponse {
   imported_count: number
   accounts: Account[]
 }
+
+export interface CookiePushChange {
+  name: string
+  domain: string
+  path: string
+  category: 'core' | 'rolling' | 'other'
+  kind: 'changed' | 'added' | 'removed'
+  before: string | null
+  after: string | null
+}
+
+export interface CookiePushEvent {
+  seq: number
+  at: number
+  account_id: string
+  name: string
+  email: string | null
+  auth_user: string
+  source: string | null
+  received_count: number
+  cookie_count: number
+  fingerprint: string
+  merged_fingerprint: string
+  previous_fingerprint: string | null
+  first: boolean
+  changed: boolean
+  merged_changed: boolean
+  changes: CookiePushChange[]
+  missing_advisory: string[]
+  merged_missing_advisory: string[]
+  session_valid: boolean | null
+  injected: boolean
+  created: boolean
+  updated_accounts: number
+}
+
+export interface CookiePushHistoryResponse {
+  entries: CookiePushEvent[]
+  total: number
+  capacity: number
+}

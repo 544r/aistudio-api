@@ -18,6 +18,7 @@ from aistudio_api.api.app import (
 )
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
+from aistudio_api.application.cookie_push_history import CookiePushHistory
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
     build_storage_state_from_browser_cookies,
@@ -94,12 +95,14 @@ def restore_runtime_state():
     original_service = runtime_state.account_service
     original_client = runtime_state.client
     original_rotator = runtime_state.rotator
+    runtime_state.cookie_push_history.clear()
     try:
         yield
     finally:
         runtime_state.account_service = original_service
         runtime_state.client = original_client
         runtime_state.rotator = original_rotator
+        runtime_state.cookie_push_history.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -547,3 +550,194 @@ async def test_push_cookies_merges_missing_cookies_from_existing_auth(tmp_path):
     assert by_name["SID"] == "new-sid"
     assert by_name["SAPISID"] == "sapisid-value"
     assert by_name["__Secure-1PSID"] == "old-psid"
+
+
+# ==================== 推送历史 ====================
+
+
+def _record_history(
+    history: CookiePushHistory,
+    jar: list[dict[str, object]],
+    *,
+    merged: list[dict[str, object]] | None = None,
+    account_id: str = "acc_1",
+):
+    return history.record(
+        account_id=account_id,
+        name="Test Account",
+        email="u***@example.com",
+        auth_user="0",
+        source="userscript",
+        raw_cookies=jar,
+        merged_cookies=merged if merged is not None else jar,
+        received_count=len(jar),
+        session_valid=True,
+        injected=False,
+        created=False,
+        updated_accounts=1,
+    )
+
+
+def test_cookie_push_history_first_and_identical_push():
+    history = CookiePushHistory()
+    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "ts-one")]
+
+    first = _record_history(history, jar)
+    assert first.first is True
+    assert first.changed is False
+    assert first.changes == []
+    assert first.cookie_count == len(jar)
+    assert first.fingerprint
+
+    same = _record_history(history, jar)
+    assert same.first is False
+    assert same.changed is False
+    assert same.changes == []
+    assert same.previous_fingerprint == first.fingerprint
+
+
+def test_cookie_push_history_marks_rolling_and_core_changes():
+    history = CookiePushHistory()
+    _record_history(history, [*_full_jar(), _cookie("__Secure-1PSIDTS", "ts-one")])
+
+    rolling = _record_history(
+        history, [*_full_jar(), _cookie("__Secure-1PSIDTS", "ts-two")]
+    )
+    assert rolling.changed is True
+    assert [change.name for change in rolling.changes] == ["__Secure-1PSIDTS"]
+    assert rolling.changes[0].category == "rolling"
+    assert rolling.changes[0].kind == "changed"
+    assert rolling.changes[0].before != rolling.changes[0].after
+
+    core_jar = [
+        _cookie("SID", "new-sid"),
+        *[cookie for cookie in _full_jar() if cookie["name"] != "SID"],
+        _cookie("__Secure-1PSIDTS", "ts-two"),
+    ]
+    core = _record_history(history, core_jar)
+    assert core.changed is True
+    assert [change.name for change in core.changes] == ["SID"]
+    assert core.changes[0].category == "core"
+    assert core.changes[0].kind == "changed"
+
+
+def test_cookie_push_history_reports_added_removed_and_missing_advisory():
+    history = CookiePushHistory()
+    _record_history(
+        history,
+        [
+            _cookie("SID", "v"),
+            _cookie("SAPISID", "s"),
+            _cookie("__Secure-1PSID", "p"),
+        ],
+    )
+    event = _record_history(
+        history,
+        [
+            _cookie("SID", "v"),
+            _cookie("SAPISID", "s"),
+            _cookie("__Secure-3PSID", "p3"),
+        ],
+    )
+
+    kinds = {(change.name, change.kind) for change in event.changes}
+    assert ("__Secure-1PSID", "removed") in kinds
+    assert ("__Secure-3PSID", "added") in kinds
+    assert event.missing_advisory == ["__Secure-1PSID"]
+    assert event.merged_missing_advisory == ["__Secure-1PSID"]
+
+
+def test_cookie_push_history_tracks_merged_jar_changes():
+    history = CookiePushHistory()
+    raw = [_cookie("SID", "v"), _cookie("SAPISID", "s")]
+    _record_history(
+        history,
+        raw,
+        merged=[*raw, _cookie("__Secure-1PSID", "old")],
+    )
+    event = _record_history(
+        history,
+        raw,
+        merged=[*raw, _cookie("__Secure-1PSID", "new")],
+    )
+
+    assert event.changed is False
+    assert event.merged_changed is True
+    assert event.changes == []
+
+
+def test_cookie_push_history_is_bounded_and_keeps_only_fingerprints():
+    history = CookiePushHistory(capacity=2)
+    for index in range(3):
+        _record_history(history, [_cookie("SID", f"secret-{index}")])
+
+    assert history.total == 2
+    entries = history.recent()
+    assert len(entries) == 2
+    assert "secret-" not in repr(entries)
+    assert entries[0].changes[0].name == "SID"
+    assert entries[0].changes[0].before is not None
+    assert entries[0].changes[0].after is not None
+    assert history.clear() == 2
+    assert history.total == 0
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_records_history_without_raw_values():
+    svc = _mock_service([_account()])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    first_jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "ts-one")]
+    second_jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "ts-two")]
+    async with _client() as client:
+        first = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": first_jar,
+                "email": "user@example.com",
+                "source": "userscript",
+            },
+        )
+        second = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": second_jar,
+                "email": "user@example.com",
+                "source": "userscript",
+            },
+        )
+        history = await client.get("/api/accounts/push-history")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert history.status_code == 200
+    payload = history.json()
+    entries = payload["entries"]
+    assert payload["total"] == 2
+    assert len(entries) == 2
+
+    latest, previous = entries
+    assert latest["first"] is False
+    assert latest["changed"] is True
+    assert latest["previous_fingerprint"] == previous["fingerprint"]
+    assert latest["cookie_count"] == len(second_jar)
+    assert latest["received_count"] == len(second_jar)
+
+    changes = {change["name"]: change for change in latest["changes"]}
+    assert set(changes) == {"__Secure-1PSIDTS"}
+    assert changes["__Secure-1PSIDTS"]["category"] == "rolling"
+    assert changes["__Secure-1PSIDTS"]["kind"] == "changed"
+    assert changes["__Secure-1PSIDTS"]["before"] != changes["__Secure-1PSIDTS"]["after"]
+
+    assert "ts-one" not in history.text
+    assert "ts-two" not in history.text
+    assert "sid-value" not in history.text
+
+    async with _client() as client:
+        cleared = await client.delete("/api/accounts/push-history")
+        after = await client.get("/api/accounts/push-history")
+
+    assert cleared.status_code == 200
+    assert cleared.json()["cleared"] == 2
+    assert after.json()["total"] == 0
