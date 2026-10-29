@@ -413,7 +413,8 @@ Setup:
    - "⏱ Set push interval": 60 minutes by default
 4. On the first push the script manager asks to connect to your server — choose "Always allow".
 5. The script pushes once after page load, then on every interval. A status pill in the bottom-right corner shows the last result; click it to push immediately.
-6. Two optional guards for long-running setups (menu toggles, off by default): "🔊 Silent audio keepalive" loops an inaudible track so the tab is not frozen/discarded (which would stop the pushes), and "🔄 Set auto-refresh interval" reloads the page every N minutes while the tab is hidden, forcing fresh requests and cookie rotation, then pushes again.
+6. Two optional guards for long-running setups (menu toggles, off by default): "🔊 Silent audio keepalive" loops an inaudible track so the tab is not frozen/discarded (which would stop the pushes), and "🔄 Set auto-refresh interval" reloads the page every N minutes while the tab is hidden, forcing fresh requests and cookie rotation, then pushes again. The keepalive toggle reports the real playback state in a dialog (if autoplay policy blocks it, the script asks you to click the page once), and the status pill shows a 🔊 marker while it is active; the menu entry also reflects the current state.
+7. To update the script, use "🔄 Check for updates": it compares the `@version` served by your server and GitHub, then opens the install page when a newer build exists (account and server settings are preserved), so no manual re-download is needed.
 
 Server behavior (`POST /api/accounts/push-cookies`):
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.1.0
+// @version      1.2.0
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -16,6 +16,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM_openInTab
 // @connect      *
 // ==/UserScript==
 
@@ -33,9 +35,12 @@
  *    点击胶囊立即手动推送。
  * 6. 长期挂机可选两个保护（菜单里开关，默认关闭）：
  *    · 「🔊 静音音频保活」：循环播放静音音轨，防止标签页被浏览器冻结/丢弃
- *      （被丢弃后定时推送会一起停）；
+ *      （被丢弃后定时推送会一起停）；开关会弹窗报告是否真的播放成功，
+ *      生效时右下角胶囊带 🔊 标记；
  *    · 「🔄 设置自动刷新间隔」：每 N 分钟在**标签页不可见时**整页刷新一次，
  *      让页面重新发请求、轮换 Cookie，刷新后会自动再推送一次。
+ * 7. 「🔄 检查脚本更新」：同时比对服务器镜像与 GitHub 上的版本号，有新版本
+ *    时直接打开安装页（配置保留），不用再手动下载覆盖。
  *
  * 说明：
  * - 推送的是完整 Google 会话 Cookie 罐（含 SID / SAPISID / __Secure-*），
@@ -87,6 +92,12 @@
     const STORE_AUDIO_KEEPALIVE = "ap_audio_keepalive";
     const STORE_REFRESH_MIN = "ap_refresh_min";
     const STORE_LAST_REFRESH = "ap_last_refresh";
+
+    const SCRIPT_VERSION = "1.2.0";
+    const GITHUB_RAW_URL =
+        "https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js";
+    const UPDATE_FETCH_TIMEOUT_MS = 15000;
+    const AUDIO_STATUS_DELAY_MS = 800;
 
     // ==================== 配置 ====================
 
@@ -181,26 +192,203 @@
         if (audioKeepAliveActive()) {
             stopAudioKeepAlive();
             GM_setValue(STORE_AUDIO_KEEPALIVE, false);
-            log("🔴 音频保活已关闭");
+            log("🔇 音频保活已关闭");
+            refreshAudioMenuLabel();
+            refreshBadge();
+            alert("🔇 静音音频保活已关闭。\n\n后台标签页可能被浏览器冻结，定时推送也会随之暂停。");
             return;
         }
         const ok = startAudioKeepAlive();
         GM_setValue(STORE_AUDIO_KEEPALIVE, ok);
+        refreshAudioMenuLabel();
+        refreshBadge();
+        if (!ok) {
+            alert("❌ 静音音频保活开启失败，请查看控制台日志。");
+            return;
+        }
+        // play() 是异步的：等一小会儿再看真实状态，避免"显示已开启但其实被拦截"
+        setTimeout(() => {
+            refreshAudioMenuLabel();
+            refreshBadge();
+            if (!audioKeepAliveActive()) return;
+            if (keepAlive.blocked) {
+                alert(
+                    "🔊 静音音频保活已开启，但浏览器拦截了自动播放。\n\n" +
+                        "请在当前页面点一下或按任意键，保活会自动恢复；\n" +
+                        "长期挂机可给浏览器加启动参数：\n" +
+                        "--autoplay-policy=no-user-gesture-required"
+                );
+            } else {
+                alert(
+                    "🔊 静音音频保活已开启（静音循环播放中）。\n\n" +
+                        "右下角状态胶囊会带 🔊 标记；再次点击本菜单可关闭。"
+                );
+            }
+        }, AUDIO_STATUS_DELAY_MS);
     }
+
+    // 菜单文字随开关状态更新：脚本管理器支持 unregister 时生效，
+    // 不支持时保留静态的「开/关」，不影响功能。
+    function refreshAudioMenuLabel() {
+        if (audioMenuHandle == null) return;
+        if (typeof GM_unregisterMenuCommand !== "function") return;
+        try {
+            GM_unregisterMenuCommand(audioMenuHandle);
+        } catch (_) {
+            return;
+        }
+        audioMenuHandle = GM_registerMenuCommand(
+            `🔊 静音音频保活: ${audioKeepAliveLabel()}`,
+            toggleAudioKeepAlive
+        );
+    }
+
+    // ==================== 脚本更新 ====================
+
+    function currentScriptVersion() {
+        try {
+            if (typeof GM_info !== "undefined" && GM_info.script && GM_info.script.version) {
+                return String(GM_info.script.version);
+            }
+        } catch (_) {}
+        return SCRIPT_VERSION;
+    }
+
+    function gmGetText(url) {
+        return new Promise((resolve, reject) => {
+            try {
+                GM_xmlhttpRequest({
+                    method: "GET",
+                    url,
+                    timeout: UPDATE_FETCH_TIMEOUT_MS,
+                    nocache: true,
+                    headers: { Accept: "text/plain, application/javascript, */*" },
+                    onload: (resp) => {
+                        if (resp.status >= 200 && resp.status < 400 && resp.responseText) {
+                            resolve(resp.responseText);
+                        } else {
+                            reject(new Error(`HTTP ${resp.status}`));
+                        }
+                    },
+                    onerror: () => reject(new Error("网络错误")),
+                    ontimeout: () => reject(new Error("请求超时")),
+                });
+            } catch (e) {
+                reject(e);
+            }
+        });
+    }
+
+    function parseUserscriptVersion(text) {
+        const m = /\/\/\s*@version\s+([0-9][0-9A-Za-z.+-]*)/.exec(String(text || ""));
+        return m ? m[1] : "";
+    }
+
+    function compareVersions(a, b) {
+        const parts = (v) =>
+            String(v)
+                .split(/[.+-]/)
+                .map((part) => parseInt(part, 10) || 0);
+        const pa = parts(a);
+        const pb = parts(b);
+        const len = Math.max(pa.length, pb.length);
+        for (let i = 0; i < len; i++) {
+            const diff = (pa[i] || 0) - (pb[i] || 0);
+            if (diff !== 0) return diff > 0 ? 1 : -1;
+        }
+        return 0;
+    }
+
+    function openInstallPage(url) {
+        try {
+            if (typeof GM_openInTab === "function") {
+                GM_openInTab(url, { active: true, insert: true });
+                return;
+            }
+        } catch (_) {}
+        const opened = window.open(url, "_blank");
+        if (!opened) log(`⚠ 浏览器拦截了新窗口，请手动打开: ${url}`);
+    }
+
+    async function checkScriptUpdate() {
+        const current = currentScriptVersion();
+        const sources = [];
+        if (cfg.server) {
+            sources.push({
+                label: "服务器镜像",
+                url: `${cfg.server}/userscripts/aistudio-cookie-push.user.js`,
+            });
+        }
+        sources.push({ label: "GitHub", url: GITHUB_RAW_URL });
+
+        setBadge("busy", "检查更新…");
+        const results = await Promise.all(
+            sources.map(async (src) => {
+                const url =
+                    src.url + (src.url.includes("?") ? "&" : "?") + "t=" + Date.now();
+                try {
+                    const text = await gmGetText(url);
+                    return { ...src, version: parseUserscriptVersion(text) };
+                } catch (e) {
+                    return { ...src, version: "", error: (e && e.message) || String(e) };
+                }
+            })
+        );
+        const valid = results.filter((r) => r.version);
+        if (!valid.length) {
+            setBadge("error", "更新检查失败");
+            alert(
+                "检查更新失败：\n" +
+                    results
+                        .map((r) => `${r.label}: ${r.error || "响应里没有版本号"}`)
+                        .join("\n")
+            );
+            return;
+        }
+
+        const newest = valid.slice().sort((a, b) => compareVersions(b.version, a.version))[0];
+        const detail = results
+            .map((r) =>
+                `${r.label}: ${r.version ? `v${r.version}` : `失败（${r.error || "无版本号"}）`}`
+            )
+            .join("\n");
+
+        if (compareVersions(newest.version, current) <= 0) {
+            setBadge("ok", `已是最新 v${current}`);
+            alert(`当前已是最新版本 v${current}。\n\n检查结果：\n${detail}`);
+            return;
+        }
+
+        setBadge("idle", `发现新版本 v${newest.version}`);
+        const go = confirm(
+            `发现新版本 v${newest.version}（当前 v${current}）\n` +
+                `更新来源：${newest.label}\n\n${detail}\n\n` +
+                "是否打开安装页？账号配置和服务器设置都会保留。\n" +
+                "若没有弹出安装页，请手动打开：\n" +
+                newest.url
+        );
+        if (go) openInstallPage(newest.url);
+    }
+
+    let audioMenuHandle = GM_registerMenuCommand(
+        "🔊 静音音频保活 开/关",
+        toggleAudioKeepAlive
+    );
 
     GM_registerMenuCommand("📤 立即推送 Cookie", () => pushNow("手动"));
     GM_registerMenuCommand("⚙ 设置服务器地址", saveServer);
     GM_registerMenuCommand("🔑 设置管理密码", savePassword);
     GM_registerMenuCommand("⏱ 设置推送间隔", saveInterval);
     GM_registerMenuCommand("✅ 设置允许推送的账号", saveAllowedEmails);
-    GM_registerMenuCommand("🔊 静音音频保活 开/关", toggleAudioKeepAlive);
     GM_registerMenuCommand("🔄 设置自动刷新间隔", saveRefreshInterval);
+    GM_registerMenuCommand("🔄 检查脚本更新", checkScriptUpdate);
     GM_registerMenuCommand("ℹ 查看状态", () => {
         alert(
-            `服务器: ${cfg.server || "未配置"}\n` +
+            `脚本版本: v${currentScriptVersion()}\n` +
+                `服务器: ${cfg.server || "未配置"}\n` +
                 `间隔: ${cfg.intervalMin} 分钟\n` +
                 `账号限制: ${cfg.allowedEmails.length ? cfg.allowedEmails.join(", ") : "不限制"}\n` +
-                `音频保活: ${audioKeepAliveActive() ? "开启" : "关闭"}\n` +
+                `音频保活: ${audioKeepAliveLabel()}\n` +
                 `自动刷新: ${cfg.refreshMin ? `每 ${cfg.refreshMin} 分钟` : "关闭"}\n` +
                 `最近推送: ${state.lastPushText || "尚未推送"}\n` +
                 `最近结果: ${state.lastResult || "-"}`
@@ -214,6 +402,8 @@
         lastPushAt: 0,
         lastPushText: "",
         lastResult: "",
+        badgeKind: "idle",
+        badgeText: "",
         timer: null,
         refreshTimer: null,
         fallbackTimer: null,
@@ -506,17 +696,43 @@
     }
 
     function setBadge(kind, text) {
+        state.badgeKind = kind;
+        state.badgeText = text;
         const el = ensureBadge();
         const colors = { idle: "#5c6bc0", ok: "#2e7d32", error: "#c62828", busy: "#1565c0" };
         el.style.background = colors[kind] || colors.idle;
-        el.textContent = `AIStudio 推送 · ${text}`;
+        const audioMark = audioKeepAliveActive() ? (keepAlive.blocked ? " · 🔇" : " · 🔊") : "";
+        el.textContent = `AIStudio 推送 · ${text}${audioMark}`;
+        el.title = audioKeepAliveActive()
+            ? `点击立即推送 Cookie\n静音音频保活: ${audioKeepAliveLabel()}`
+            : "点击立即推送 Cookie";
+    }
+
+    // 音频保活状态变化后重绘胶囊（保留最近一次推送文案与颜色）
+    function refreshBadge() {
+        if (!state.badgeText) return;
+        setBadge(state.badgeKind || "idle", state.badgeText);
     }
 
     // ==================== 音频保活 ====================
 
     // 构造 1 秒全零采样的 WAV：循环播放时标签页始终处于"正在播放音频"状态，
     // Chrome 不会冻结/丢弃它（标签页一旦被丢弃，定时推送也会跟着停摆）。
-    const keepAlive = { el: null, ctx: null, gestureBound: false };
+    const keepAlive = {
+        el: null,
+        ctx: null,
+        url: "",
+        gestureRetry: null,
+        blocked: false,
+    };
+
+    function audioKeepAliveLabel() {
+        if (!audioKeepAliveActive()) return "关";
+        if (keepAlive.blocked) return "开（被拦截，点页面后恢复）";
+        if (keepAlive.el && !keepAlive.el.paused) return "开（静音播放中）";
+        if (keepAlive.ctx && keepAlive.ctx.state === "running") return "开（Web Audio 播放中）";
+        return "开（启动中）";
+    }
 
     function makeSilentWavUrl() {
         const sampleRate = 8000;
@@ -551,13 +767,21 @@
     function startAudioKeepAlive() {
         if (audioKeepAliveActive()) return true;
         try {
+            const url = makeSilentWavUrl();
             const el = document.createElement("audio");
-            el.src = makeSilentWavUrl();
+            el.src = url;
             el.loop = true;
             el.volume = 0.01;
             el.style.display = "none";
+            el.addEventListener("playing", () => {
+                keepAlive.blocked = false;
+                refreshAudioMenuLabel();
+                refreshBadge();
+            });
             document.body.appendChild(el);
             keepAlive.el = el;
+            keepAlive.url = url;
+            keepAlive.blocked = false;
             log("✅ 音频保活已开启（静音循环）");
             resumeKeepAliveAudio();
             return true;
@@ -568,6 +792,8 @@
     }
 
     function stopAudioKeepAlive() {
+        disarmGestureRetry();
+        keepAlive.blocked = false;
         if (keepAlive.el) {
             try {
                 keepAlive.el.pause();
@@ -583,6 +809,12 @@
             } catch (_) {}
             keepAlive.ctx = null;
         }
+        if (keepAlive.url) {
+            try {
+                URL.revokeObjectURL(keepAlive.url);
+            } catch (_) {}
+            keepAlive.url = "";
+        }
     }
 
     // 自动播放策略会拦截"没有用户手势"的播放：静音轨道通常放行；仍被拦截时
@@ -591,11 +823,20 @@
         const el = keepAlive.el;
         if (!el) return;
         const playing = el.play();
-        if (playing && typeof playing.catch === "function") {
-            playing.catch(() => {
-                startWebAudioKeepAlive();
-                armGestureRetry();
-            });
+        if (playing && typeof playing.then === "function") {
+            playing
+                .then(() => {
+                    keepAlive.blocked = false;
+                    refreshAudioMenuLabel();
+                    refreshBadge();
+                })
+                .catch(() => {
+                    keepAlive.blocked = true;
+                    startWebAudioKeepAlive();
+                    armGestureRetry();
+                    refreshAudioMenuLabel();
+                    refreshBadge();
+                });
         }
     }
 
@@ -613,27 +854,59 @@
             gain.connect(ctx.destination);
             osc.start();
             keepAlive.ctx = ctx;
-            log("✅ 音频保活已切换为 Web Audio 静音振荡器");
+            keepAlive.blocked = ctx.state !== "running";
+            log(
+                keepAlive.blocked
+                    ? "⚠ 音频保活已创建 Web Audio 上下文，等待用户手势后播放"
+                    : "✅ 音频保活已切换为 Web Audio 静音振荡器"
+            );
         } catch (e) {
             log(`⚠ Web Audio 保活不可用: ${(e && e.message) || e}`);
         }
     }
 
     function armGestureRetry() {
-        if (keepAlive.gestureBound) return;
-        keepAlive.gestureBound = true;
+        if (keepAlive.gestureRetry) return;
         const retry = () => {
-            if (keepAlive.el) keepAlive.el.play().catch(() => {});
+            disarmGestureRetry();
+            if (keepAlive.el) {
+                keepAlive.el
+                    .play()
+                    .then(() => {
+                        keepAlive.blocked = false;
+                        refreshAudioMenuLabel();
+                        refreshBadge();
+                    })
+                    .catch(() => {});
+            }
             if (keepAlive.ctx && keepAlive.ctx.state === "suspended") {
-                keepAlive.ctx.resume().catch(() => {});
+                keepAlive.ctx
+                    .resume()
+                    .then(() => {
+                        keepAlive.blocked = keepAlive.ctx
+                            ? keepAlive.ctx.state !== "running"
+                            : false;
+                        refreshAudioMenuLabel();
+                        refreshBadge();
+                    })
+                    .catch(() => {});
             }
         };
+        keepAlive.gestureRetry = retry;
         document.addEventListener("pointerdown", retry, { once: true });
         document.addEventListener("keydown", retry, { once: true });
         log(
             "⚠ 音频保活被自动播放策略拦截：在页面点一下即可启用；" +
                 "长期挂机建议给浏览器加参数 --autoplay-policy=no-user-gesture-required"
         );
+    }
+
+    function disarmGestureRetry() {
+        const retry = keepAlive.gestureRetry;
+        if (!retry) return;
+        document.removeEventListener("pointerdown", retry);
+        document.removeEventListener("keydown", retry);
+        keepAlive.gestureRetry = null;
     }
 
     // ==================== 调度 ====================
@@ -711,8 +984,10 @@
     function init() {
         if (!location.hostname.endsWith("aistudio.google.com")) return;
 
+        if (cfg.audioKeepAlive) startAudioKeepAlive();
+        refreshAudioMenuLabel();
         setBadge("idle", cfg.server ? "准备推送" : "未配置服务器");
-        log(`脚本已加载 v1.1.0，服务器: ${cfg.server || "未配置"}`);
+        log(`脚本已加载 v${currentScriptVersion()}，服务器: ${cfg.server || "未配置"}`);
 
         if (!cfg.server) {
             log("⚠ 请先通过 篡改猴 菜单设置服务器地址（「⚙ 设置服务器地址」）");
@@ -723,7 +998,6 @@
         state.timer = createWorkerTimer(cfg.intervalMin * 60 * 1000, () =>
             pushNow("定时")
         );
-        if (cfg.audioKeepAlive) startAudioKeepAlive();
         if (cfg.refreshMin > 0) {
             state.refreshTimer = createWorkerTimer(
                 cfg.refreshMin * 60 * 1000,
