@@ -509,6 +509,11 @@ async def spa_navigation_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
+    # 前端资源文件名不含内容哈希（assets/AccountsView.js 这种固定名），
+    # 必须每次协商缓存；否则升级镜像后浏览器可能继续使用旧文件导致界面不更新
+    if request.url.path.startswith(("/assets/", "/static/")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+
     if request.url.path.startswith(("/accounts", "/api/accounts")) or is_html_nav:
         existing_vary = response.headers.get("Vary")
         if existing_vary:
