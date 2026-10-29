@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlencode
 
 import httpx
 import pytest
 
-from aistudio_api.api.app import app
+from aistudio_api.api.app import (
+    _DUMP_SENSITIVE_HEADERS,
+    _DUMP_SENSITIVE_QUERY_KEYS,
+    _mask_dump_value,
+    _masked_dump_url,
+    app,
+)
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
 from aistudio_api.infrastructure.account.account_store import AccountMeta
@@ -174,6 +181,34 @@ def test_missing_session_cookies():
     assert missing_session_cookies(["SID", "__Secure-1PSID"]) == ["SAPISID"]
     assert missing_session_cookies(["SID", "SAPISID"]) == ["__Secure-1PSID"]
     assert missing_session_cookies([]) == ["SID", "SAPISID", "__Secure-1PSID"]
+
+
+def test_dump_metadata_masks_credentials():
+    for header in (
+        "authorization",
+        "X-Api-Key",
+        "x-goog-api-key",
+        "Cookie",
+        "Set-Cookie",
+    ):
+        assert _mask_dump_value(header, "secret", _DUMP_SENSITIVE_HEADERS) == "***"
+    assert (
+        _mask_dump_value("content-type", "application/json", _DUMP_SENSITIVE_HEADERS)
+        == "application/json"
+    )
+    for key in ("key", "password", "token", "api_key"):
+        assert _mask_dump_value(key, "secret", _DUMP_SENSITIVE_QUERY_KEYS) == "***"
+    assert _mask_dump_value("alt", "sse", _DUMP_SENSITIVE_QUERY_KEYS) == "sse"
+
+    url = _masked_dump_url(
+        "http://test/api/accounts/push-cookies?key=secret&alt=sse",
+        {"key": "***", "alt": "sse"},
+    )
+    assert "secret" not in url
+    assert url == "http://test/api/accounts/push-cookies?" + urlencode(
+        {"key": "***", "alt": "sse"}
+    )
+    assert _masked_dump_url("http://test/health", {}) == "http://test/health"
 
 
 # ==================== 推送接口 ====================

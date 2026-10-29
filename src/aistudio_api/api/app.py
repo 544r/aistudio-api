@@ -8,6 +8,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -42,6 +43,27 @@ from .state import runtime_state
 _log_cfg = get_configured_logging_settings()
 setup_logging(str(_log_cfg.get("level", "INFO")))
 logger = get_logger("server")
+
+# Dump 会把请求头与查询参数原样落盘；管理密码、API Key 与 Cookie 会话票
+# 不应出现在可下载的调试文件里，统一打码。
+_DUMP_SENSITIVE_HEADERS = frozenset(
+    {"authorization", "x-api-key", "x-goog-api-key", "cookie", "set-cookie"}
+)
+_DUMP_SENSITIVE_QUERY_KEYS = frozenset({"key", "password", "token", "api_key"})
+_DUMP_REDACTED = "***"
+
+
+def _mask_dump_value(key: str, value: str, sensitive: frozenset[str]) -> str:
+    return _DUMP_REDACTED if key.lower() in sensitive else value
+
+
+def _masked_dump_url(url: str, query: dict[str, str]) -> str:
+    """用已打码的查询参数字典重建 URL，避免原值随 url 字段落盘。"""
+    if "?" not in url:
+        return url
+    base = url.split("?", 1)[0]
+    masked = urlencode(query)
+    return f"{base}?{masked}" if masked else base
 
 
 @asynccontextmanager
@@ -319,6 +341,7 @@ async def logging_and_dump_middleware(request, call_next):
     client_str = ""
     headers_dict = None
     query_dict = None
+    request_url = ""
 
     if dump_enabled:
         req_id = f"req_{secrets.token_hex(4)}"
@@ -327,8 +350,15 @@ async def logging_and_dump_middleware(request, call_next):
             if request.client
             else "unknown"
         )
-        headers_dict = dict(request.headers)
-        query_dict = dict(request.query_params)
+        headers_dict = {
+            k: _mask_dump_value(k, v, _DUMP_SENSITIVE_HEADERS)
+            for k, v in dict(request.headers).items()
+        }
+        query_dict = {
+            k: _mask_dump_value(k, v, _DUMP_SENSITIVE_QUERY_KEYS)
+            for k, v in dict(request.query_params).items()
+        }
+        request_url = _masked_dump_url(str(request.url), query_dict)
         try:
             body_bytes = await request.body()
             body_text = body_bytes.decode("utf-8", errors="replace")
@@ -343,7 +373,7 @@ async def logging_and_dump_middleware(request, call_next):
             dump_request_exchange(
                 req_id=req_id,
                 method=request.method,
-                url=str(request.url),
+                url=request_url,
                 client=client_str,
                 headers=headers_dict or {},
                 query_params=query_dict or {},
@@ -388,14 +418,17 @@ async def logging_and_dump_middleware(request, call_next):
         dump_request_exchange(
             req_id=req_id,
             method=request.method,
-            url=str(request.url),
+            url=request_url,
             client=client_str,
             headers=headers_dict or {},
             query_params=query_dict or {},
             body_text=body_text,
             status_code=response.status_code,
             elapsed_ms=elapsed_ms,
-            response_headers=dict(response.headers),
+            response_headers={
+                k: _mask_dump_value(k, v, _DUMP_SENSITIVE_HEADERS)
+                for k, v in response.headers.items()
+            },
             response_text=resp_text,
             is_stream=is_event_stream,
         )

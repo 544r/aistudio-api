@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.0.0
+// @version      1.0.1
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
 // @match        https://alkalimakersuite-pa.clients6.google.com/*
 // @run-at       document-idle
 // @noframes
+// @grant        unsafeWindow
 // @grant        GM_cookie
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -22,7 +23,8 @@
  *    管理密码就是 aistudio-api 管理控制台的登录密码（未设置则留空）。
  * 2. 篡改猴 需把「允许脚本访问 Cookie」设为 all，否则读不到 HttpOnly 的
  *    会话 Cookie：管理面板 → 设置 → 配置模式选「高级」→ 安全栏 → 设为 all → 保存。
- * 3. 之后保持本页（或任意 AI Studio 页）开着即可：页面加载后自动推一次，
+ * 3. 首次推送时 篡改猴 会弹出"连接到 xxx"的授权框，选「总是允许」。
+ * 4. 之后保持本页（或任意 AI Studio 页）开着即可：页面加载后自动推一次，
  *    之后按设定间隔自动重推（默认 60 分钟）；右下角胶囊显示最近一次结果，
  *    点击胶囊立即手动推送。
  *
@@ -36,6 +38,9 @@
 
 (function () {
     "use strict";
+
+    // 页面原始 window：Trusted Types 策略对象必须由页面上下文创建
+    const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
     // ==================== 常量 ====================
 
@@ -308,11 +313,17 @@
                 source: "userscript",
             };
             const headers = { "Content-Type": "application/json" };
-            if (cfg.password) headers["x-api-key"] = cfg.password;
+            // 密码同时走 header 与 query：header 只允许 Latin-1，中文/特殊字符密码
+            // 在部分管理器里会被拒绝，query 经 URL 编码没有这个限制（服务端两种都认）
+            let pushUrl = `${cfg.server}/api/accounts/push-cookies`;
+            if (cfg.password) {
+                headers["x-api-key"] = cfg.password;
+                pushUrl += `?key=${encodeURIComponent(cfg.password)}`;
+            }
 
             log(`☁ 开始推送（${reason}）：${cookies.length} 条 Cookie，u/${payload.auth_user}`);
             const resp = await gmPost(
-                `${cfg.server}/api/accounts/push-cookies`,
+                pushUrl,
                 headers,
                 JSON.stringify(payload)
             );
@@ -415,7 +426,7 @@
                 ");onmessage=(e)=>{if(e.data==='stop'){clearInterval(t);close()}};";
             const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
             let workerUrl = null;
-            const tt = window.trustedTypes;
+            const tt = W.trustedTypes;
             if (tt && tt.createPolicy) {
                 try {
                     workerUrl = tt
@@ -451,7 +462,7 @@
         if (!location.hostname.endsWith("aistudio.google.com")) return;
 
         setBadge("idle", cfg.server ? "准备推送" : "未配置服务器");
-        log(`脚本已加载 v1.0.0，服务器: ${cfg.server || "未配置"}`);
+        log(`脚本已加载 v1.0.1，服务器: ${cfg.server || "未配置"}`);
 
         if (!cfg.server) {
             log("⚠ 请先通过 篡改猴 菜单设置服务器地址（「⚙ 设置服务器地址」）");

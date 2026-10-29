@@ -410,7 +410,8 @@ Setup:
    - "⚙ Set server address": e.g. `http://192.168.1.10:8000`
    - "🔑 Set admin password": the `AISTUDIO_WEB_PASSWORD` value (leave empty when auth is disabled)
    - "⏱ Set push interval": 60 minutes by default
-4. The script pushes once after page load, then on every interval. A status pill in the bottom-right corner shows the last result; click it to push immediately.
+4. On the first push the script manager asks to connect to your server — choose "Always allow".
+5. The script pushes once after page load, then on every interval. A status pill in the bottom-right corner shows the last result; click it to push immediately.
 
 Server behavior (`POST /api/accounts/push-cookies`):
 
