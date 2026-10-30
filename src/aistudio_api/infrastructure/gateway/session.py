@@ -220,6 +220,15 @@ class BrowserSession:
         """Switch auth using blue-green transition without killing in-flight streams."""
         await self.transition_to_account(auth_file, force_refresh=True)
 
+    async def reset_session(self) -> None:
+        """账号池已清空时复位会话：丢弃登录态并关闭浏览器，等待下次重新初始化。"""
+        async with self._transition_lock:
+            self._auth_file = None
+            self._auth_user = None
+            self._tier = None
+            await self._close_internal(save_cookies=False)
+            log.info("账号池已清空，浏览器会话已复位")
+
     async def transition_to_account(
         self, auth_file: str | None, force_refresh: bool = False
     ) -> SessionContext:

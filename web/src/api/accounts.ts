@@ -12,6 +12,7 @@ import type {
   SnapshotPresetRequest,
   ApplyPresetResponse,
   AccountHealthCheckResponse,
+  DeleteExpiredAccountsResponse,
   CookiePushHistoryResponse,
 } from '@/types'
 
@@ -48,6 +49,12 @@ export const accountsApi = {
 
   delete(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/api/accounts/${id}`, {
+      method: 'DELETE',
+    })
+  },
+
+  deleteExpired(): Promise<DeleteExpiredAccountsResponse> {
+    return request<DeleteExpiredAccountsResponse>('/api/accounts/expired', {
       method: 'DELETE',
     })
   },

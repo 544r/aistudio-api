@@ -168,3 +168,96 @@ async def test_accounts_health_check_endpoint(monkeypatch):
             }
     finally:
         runtime_state.rotator = original_rotator
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_accounts_only_removes_session_expired():
+    """DELETE /api/accounts/expired 只删除登录态失效账号，不影响正常账号。"""
+    expired = AccountMeta(
+        id="acc_expired",
+        name="Expired Account",
+        email="expired@example.com",
+        created_at="2026-10-17T00:00:00Z",
+        last_used=None,
+        auth_user="0",
+        cookie_id="cookie_1",
+    )
+    healthy = AccountMeta(
+        id="acc_healthy",
+        name="Healthy Account",
+        email="healthy@example.com",
+        created_at="2026-10-17T00:00:00Z",
+        last_used=None,
+        auth_user="0",
+        cookie_id="cookie_2",
+    )
+
+    mock_svc = MagicMock(spec=AccountService)
+    mock_svc.list_accounts.return_value = [expired, healthy]
+    mock_svc.get_active_account.return_value = healthy
+    mock_svc.delete_account.side_effect = lambda account_id: account_id == expired.id
+
+    expired_stats = MagicMock(session_expired=True)
+    healthy_stats = MagicMock(session_expired=False)
+    rotator = MagicMock()
+    rotator.get_account_stats.side_effect = lambda account_id: (
+        expired_stats if account_id == expired.id else healthy_stats
+    )
+
+    original_service = runtime_state.account_service
+    original_rotator = runtime_state.rotator
+    original_client = runtime_state.client
+    runtime_state.account_service = mock_svc
+    runtime_state.rotator = rotator
+    runtime_state.client = None
+    try:
+        async with _client() as client:
+            resp = await client.delete("/api/accounts/expired")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "deleted": 1,
+            "ids": [expired.id],
+            "names": [expired.name],
+        }
+        mock_svc.delete_account.assert_called_once_with(expired.id)
+        rotator.remove_account.assert_called_once_with(expired.id)
+    finally:
+        runtime_state.account_service = original_service
+        runtime_state.rotator = original_rotator
+        runtime_state.client = original_client
+
+
+@pytest.mark.asyncio
+async def test_delete_expired_accounts_noop_when_none_expired():
+    """没有失效账号时返回 deleted=0，且不会误删任何账号。"""
+    acc = AccountMeta(
+        id="acc_ok",
+        name="Healthy Account",
+        email="ok@example.com",
+        created_at="2026-10-17T00:00:00Z",
+        last_used=None,
+        auth_user="0",
+        cookie_id="cookie_1",
+    )
+    mock_svc = MagicMock(spec=AccountService)
+    mock_svc.list_accounts.return_value = [acc]
+
+    rotator = MagicMock()
+    rotator.get_account_stats.return_value = MagicMock(session_expired=False)
+
+    original_service = runtime_state.account_service
+    original_rotator = runtime_state.rotator
+    original_client = runtime_state.client
+    runtime_state.account_service = mock_svc
+    runtime_state.rotator = rotator
+    runtime_state.client = None
+    try:
+        async with _client() as client:
+            resp = await client.delete("/api/accounts/expired")
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": 0, "ids": [], "names": []}
+        mock_svc.delete_account.assert_not_called()
+    finally:
+        runtime_state.account_service = original_service
+        runtime_state.rotator = original_rotator
+        runtime_state.client = original_client

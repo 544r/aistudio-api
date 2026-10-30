@@ -88,6 +88,20 @@ async function handleHealthCheck() {
   }
 }
 
+async function handleDeleteExpired() {
+  const count = expiredAccounts.value.length
+  if (count === 0) return
+  const names = `${expiredNames.value}${count > 3 ? ' 等' : ''}`
+  if (
+    !confirm(
+      `确定删除全部 ${count} 个登录态失效账号吗？\n${names}\n\n账号目录与 auth.json 会一并删除，此操作不可恢复。`,
+    )
+  ) {
+    return
+  }
+  await accountsStore.deleteExpiredAccounts()
+}
+
 onMounted(loadData)
 usePolling(loadData, 8000)
 
@@ -230,15 +244,27 @@ async function handleDeletePreset(presetId: string, name: string) {
           {{ expiredNames }}{{ expiredAccounts.length > 3 ? ' 等' : '' }} 已被暂停使用，调用时不会选中它们。请重新导入 Cookie，或点击账号行的「恢复」后重试。
         </p>
       </div>
-      <Button
-        variant="secondary"
-        size="sm"
-        :loading="checkingHealth"
-        @click="handleHealthCheck"
-      >
-        <ShieldCheck class="w-3.5 h-3.5" />
-        重新检测
-      </Button>
+      <div class="flex shrink-0 items-center gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          :loading="checkingHealth"
+          @click="handleHealthCheck"
+        >
+          <ShieldCheck class="w-3.5 h-3.5" />
+          重新检测
+        </Button>
+        <Button
+          variant="danger"
+          size="sm"
+          :loading="accountsStore.deletingExpired"
+          title="删除全部登录态失效的账号（含其 auth.json，不可恢复）"
+          @click="handleDeleteExpired"
+        >
+          <Trash2 class="w-3.5 h-3.5" />
+          一键删除失效
+        </Button>
+      </div>
     </div>
 
     <!-- Presets & Custom Schemes Ribbon -->

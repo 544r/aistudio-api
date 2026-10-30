@@ -55,6 +55,12 @@ export interface AccountHealthCheckResponse {
   unknown: string[]
 }
 
+export interface DeleteExpiredAccountsResponse {
+  deleted: number
+  ids: string[]
+  names: string[]
+}
+
 export interface ApplyPresetResponse {
   ok: boolean
   preset_id: string

@@ -752,6 +752,79 @@ async def detect_account_tier(
     return to_account_response(acc)
 
 
+@router.delete("/expired")
+async def delete_expired_accounts(
+    account_service: AccountService = Depends(get_account_service),
+    runtime_state: RuntimeState = Depends(get_runtime_state),
+) -> dict[str, object]:
+    """一键删除全部登录态失效 (session_expired) 的账号，删除后不可恢复。
+
+    该静态路由必须声明在 `/{account_id}` 之前，否则 "expired" 会被当成账号 ID。
+    """
+    rotator = runtime_state.rotator
+    expired = [
+        acc
+        for acc in account_service.list_accounts()
+        if rotator is not None
+        and (stats := rotator.get_account_stats(acc.id)) is not None
+        and stats.session_expired
+    ]
+    if not expired:
+        return {"deleted": 0, "ids": [], "names": []}
+
+    active_account = account_service.get_active_account()
+    active_deleted = active_account is not None and any(
+        acc.id == active_account.id for acc in expired
+    )
+
+    deleted_ids: list[str] = []
+    deleted_names: list[str] = []
+    for acc in expired:
+        if not account_service.delete_account(acc.id):
+            continue
+        deleted_ids.append(acc.id)
+        deleted_names.append(acc.name or acc.email or acc.id)
+        if rotator is not None:
+            rotator.remove_account(acc.id)
+        log.info("已删除登录态失效账号: %s (%s)", acc.id, acc.name)
+
+    if active_deleted:
+        remaining = account_service.list_accounts()
+        new_active = next(
+            (
+                acc
+                for acc in remaining
+                if acc.enabled
+                and not (
+                    rotator is not None
+                    and (stats := rotator.get_account_stats(acc.id)) is not None
+                    and stats.session_expired
+                )
+            ),
+            remaining[0] if remaining else None,
+        )
+        browser_session = (
+            runtime_state.client._session if runtime_state.client else None
+        )
+        if new_active is not None:
+            account_service.set_active_account(new_active.id)
+            if browser_session is not None:
+                new_auth_path = account_service.get_account_auth_path(new_active.id)
+                await browser_session.switch_auth(
+                    str(new_auth_path) if new_auth_path else None
+                )
+        elif browser_session is not None:
+            # 账号池已清空：直接复位会话，避免用已删除账号的 Cookie 继续握手机器人校验
+            await browser_session.reset_session()
+
+    log.info(
+        "已一键删除 %d 个登录态失效账号: %s",
+        len(deleted_ids),
+        ", ".join(deleted_ids),
+    )
+    return {"deleted": len(deleted_ids), "ids": deleted_ids, "names": deleted_names}
+
+
 @router.delete("/{account_id}")
 async def delete_account(
     account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
@@ -783,7 +856,7 @@ async def delete_account(
                 )
         else:
             if browser_session is not None:
-                await browser_session.switch_auth(None)
+                await browser_session.reset_session()
 
     log.info("已删除账号: %s", account_id)
     return {"ok": True}
@@ -829,7 +902,7 @@ async def delete_cookie_group(
                 )
         else:
             if browser_session is not None:
-                await browser_session.switch_auth(None)
+                await browser_session.reset_session()
 
     return {"deleted": deleted_count}
 

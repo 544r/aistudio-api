@@ -23,6 +23,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   const loading = ref(false)
   const activatingId = ref<string | null>(null)
   const importing = ref(false)
+  const deletingExpired = ref(false)
   const presets = ref<AccountPreset[]>([])
   const groups = ref<string[]>([])
   const applyingPresetId = ref<string | null>(null)
@@ -198,6 +199,28 @@ export const useAccountsStore = defineStore('accounts', () => {
     }
   }
 
+  async function deleteExpiredAccounts() {
+    const toast = useToastStore()
+    if (deletingExpired.value) return 0
+    deletingExpired.value = true
+    try {
+      const res = await accountsApi.deleteExpired()
+      if (res.deleted > 0) {
+        toast.success(`已删除 ${res.deleted} 个登录态失效账号`)
+      } else {
+        toast.info('没有需要删除的失效账号')
+      }
+      await fetchAll()
+      return res.deleted
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '批量删除失败'
+      toast.error(msg)
+      return 0
+    } finally {
+      deletingExpired.value = false
+    }
+  }
+
   async function updateAccountName(id: string, name: string) {
     const toast = useToastStore()
     try {
@@ -303,10 +326,12 @@ export const useAccountsStore = defineStore('accounts', () => {
     loading,
     activatingId,
     importing,
+    deletingExpired,
     fetchAll,
     activateAccount,
     deleteAccount,
     deleteCookieGroup,
+    deleteExpiredAccounts,
     updateAccountName,
     importCookies,
     probeAndImport,
