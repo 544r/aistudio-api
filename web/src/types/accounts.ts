@@ -61,6 +61,12 @@ export interface DeleteExpiredAccountsResponse {
   names: string[]
 }
 
+export interface DetectEmailResponse extends Account {
+  detected_email: string | null
+  email_updated: boolean
+  email_conflict: boolean
+}
+
 export interface ApplyPresetResponse {
   ok: boolean
   preset_id: string

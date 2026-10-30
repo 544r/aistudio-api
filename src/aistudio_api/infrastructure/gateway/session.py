@@ -558,7 +558,8 @@ class BrowserSession:
 
     async def extract_account_email(self, page: CDPPage | None = None) -> str | None:
         target = page or (self.active_context.page if self.active_context else None)
-        return await extract_account_email(target)
+        auth_user = self.get_current_auth_user()
+        return await extract_account_email(target, auth_user=auth_user)
 
     async def extract_account_tier(self, page: CDPPage | None = None) -> str | None:
         target = page or (self.active_context.page if self.active_context else None)

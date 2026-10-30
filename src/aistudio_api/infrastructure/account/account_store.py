@@ -435,7 +435,11 @@ class AccountStore:
             if existing is not None:
                 account_id = existing.id
                 created_at = existing.created_at
-                if resolved_tier == "Free" and existing.tier and existing.tier != "Free":
+                if (
+                    resolved_tier == "Free"
+                    and existing.tier
+                    and existing.tier != "Free"
+                ):
                     resolved_tier = existing.tier
                 if resolved_group == "default" and existing.group:
                     resolved_group = existing.group
@@ -511,7 +515,14 @@ class AccountStore:
         acc = self._find_registered_account(registry, account_id)
         if acc is None or acc.email == email:
             return False
+        previous_email = (acc.email or "").strip().lower()
         acc.email = email
+        # 名称从未被手动改过（为空或仍等于旧邮箱）时跟随邮箱更新，
+        # 避免出现「名称是一个邮箱、邮箱字段是另一个」的双重身份。
+        if not acc.name or (
+            previous_email and acc.name.strip().lower() == previous_email
+        ):
+            acc.name = email
         account_dir = _safe_account_dir(self._accounts_dir, acc.id)
         meta_path = account_dir / "meta.json"
         if meta_path.exists():
@@ -631,6 +642,7 @@ class AccountStore:
         if modified:
             self._save_registry(registry)
         return modified
+
     # ─── 预设方案 (Presets) 管理 ───
     def _ensure_default_presets(self) -> None:
         if self._presets_path.exists():
@@ -670,6 +682,7 @@ class AccountStore:
             self._presets = presets
             payload = {pid: p.to_dict() for pid, p in presets.items()}
             _atomic_write_json(self._presets_path, payload)
+
     def list_presets(self) -> list[AccountPreset]:
         """列出所有预设方案。"""
         presets = self._load_presets()

@@ -115,6 +115,10 @@ def stub_probe(monkeypatch):
     async def fake_tier(_cookies, auth_user="0"):
         return "Free"
 
+    async def fake_email(_cookies, auth_user="0"):
+        # 默认视为探测失败：走上报邮箱，保持既有用例的语义
+        return None
+
     monkeypatch.setattr(
         "aistudio_api.application.account_health.probe_account_session",
         fake_probe,
@@ -122,6 +126,10 @@ def stub_probe(monkeypatch):
     monkeypatch.setattr(
         "aistudio_api.api.routes_accounts.probe_account_benefit_tier",
         fake_tier,
+    )
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_email",
+        fake_email,
     )
 
 
@@ -325,6 +333,92 @@ async def test_push_cookies_creates_unknown_account(monkeypatch):
     assert kwargs.get("account_id") is None
     assert kwargs["email"] == "new@example.com"
     assert kwargs["cookie_id"].startswith("cookie_")
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_trusts_cookie_identity_over_reported_email(monkeypatch):
+    """上报邮箱可能是从同浏览器另一个账号读到的，应以 Cookie 罐归属为准。"""
+    target = _account(email="real@example.com")
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def fake_email(_cookies, auth_user="0"):
+        return "real@example.com"
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_email", fake_email
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "email": "typo@example.com"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["account_id"] == "acc_1"
+    assert data["created"] is False
+    kwargs = svc.save_account_from_cookies.call_args.kwargs
+    assert kwargs["account_id"] == "acc_1"
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_falls_back_when_binding_is_gone():
+    """绑定的账号被删除后，推送要回退匹配，而不是直接 404。"""
+    target = _account()
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": _full_jar(),
+                "account_id": "acc_deleted",
+                "email": "user@example.com",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["account_id"] == "acc_1"
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_ignores_binding_for_other_account(monkeypatch):
+    """绑定账号与本次 Cookie 属于不同账号时，只能匹配/新建，不能覆盖绑定账号。"""
+    bound = _account("acc_bound", email="bound@example.com", cookie_id="cookie_a")
+    other = _account("acc_other", email="other@example.com", cookie_id="cookie_b")
+    svc = _mock_service([bound, other])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def fake_email(_cookies, auth_user="0"):
+        return "other@example.com"
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_email", fake_email
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": _full_jar(),
+                "account_id": "acc_bound",
+                "email": "other@example.com",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["account_id"] == "acc_other"
+    updated_ids = {
+        call.kwargs["account_id"]
+        for call in svc.save_account_from_cookies.call_args_list
+    }
+    assert updated_ids == {"acc_other"}
 
 
 @pytest.mark.asyncio

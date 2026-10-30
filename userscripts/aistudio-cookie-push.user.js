@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.2.0
+// @version      1.3.0
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -41,6 +41,9 @@
  *      让页面重新发请求、轮换 Cookie，刷新后会自动再推送一次。
  * 7. 「🔄 检查脚本更新」：同时比对服务器镜像与 GitHub 上的版本号，有新版本
  *    时直接打开安装页（配置保留），不用再手动下载覆盖。
+ * 8. 首次推送成功后脚本会记住服务端返回的 account_id（按「服务器 + u/N」保存），
+ *    之后推送直接绑定该账号；页面邮箱只作提示，不再用于匹配账号，避免多账号
+ *    浏览器把你个人浏览器里的账号推成别的号。
  *
  * 说明：
  * - 推送的是完整 Google 会话 Cookie 罐（含 SID / SAPISID / __Secure-*），
@@ -93,7 +96,7 @@
     const STORE_REFRESH_MIN = "ap_refresh_min";
     const STORE_LAST_REFRESH = "ap_last_refresh";
 
-    const SCRIPT_VERSION = "1.2.0";
+    const SCRIPT_VERSION = "1.3.0";
     const GITHUB_RAW_URL =
         "https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js";
     const UPDATE_FETCH_TIMEOUT_MS = 15000;
@@ -453,21 +456,52 @@
         return m ? m[1] : "0";
     }
 
+    // 账号绑定：首次推送成功后服务端返回 account_id，之后按「服务器 + u/N」记住，
+    // 后续推送直接带上它。邮箱在多账号浏览器里可能读错，不能当唯一身份用。
+    function bindingKey() {
+        const server = String(cfg.server || "").replace(/[^a-z0-9]+/gi, "_");
+        return `ap_bind_${server}_u${accountPathPrefix()}`;
+    }
+
+    function getBoundAccountId() {
+        try {
+            return String(GM_getValue(bindingKey(), "") || "");
+        } catch (_) {
+            return "";
+        }
+    }
+
+    function setBoundAccountId(accountId) {
+        if (!accountId) return;
+        try {
+            GM_setValue(bindingKey(), String(accountId));
+        } catch (_) {}
+    }
+
+    // 只认「和当前 u/N 绑定」的邮箱来源；读不到就返回空串，由服务端用 Cookie 罐探测。
+    // 旧实现会扫 aria-label / 第一个 [data-email]，在多账号浏览器里容易拿到别的号。
     function detectEmail() {
+        const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+        const EMAIL_RE = /[\w.+-]+@[\w-]+\.[a-zA-Z0-9.-]+/;
+        const pageWindow = typeof W !== "undefined" && W ? W : window;
+
         try {
-            const um = location.search.match(/[?&]Email=([^&]+)/);
-            if (um) return decodeURIComponent(um[1]).toLowerCase();
+            const wiz = pageWindow.WIZ_global_data && pageWindow.WIZ_global_data.oPEP7c;
+            if (typeof wiz === "string" && EMAIL_RE.test(wiz)) return norm(wiz);
         } catch (_) {}
+
         try {
-            for (const el of document.querySelectorAll("[data-email]")) {
-                const m = (el.getAttribute("data-email") || "").match(/[\w.+-]+@[\w.-]+\.\w+/);
-                if (m) return m[0].toLowerCase();
-            }
+            const html = (document.documentElement && document.documentElement.innerHTML) || "";
+            const m = html.match(/"oPEP7c"\s*:\s*"([^"@\s]+@[^"\s]+)"/);
+            if (m && m[1]) return norm(m[1]);
         } catch (_) {}
+
         try {
-            for (const link of document.querySelectorAll("a[aria-label]")) {
-                const m = (link.getAttribute("aria-label") || "").match(/[\w.+-]+@[\w.-]+\.\w+/);
-                if (m) return m[0].toLowerCase();
+            const want = accountPathPrefix();
+            for (const el of document.querySelectorAll("[data-email][data-au]")) {
+                if (String(el.getAttribute("data-au") || "") !== want) continue;
+                const m = (el.getAttribute("data-email") || "").match(EMAIL_RE);
+                if (m) return norm(m[0]);
             }
         } catch (_) {}
         return "";
@@ -605,6 +639,7 @@
                 cookies,
                 auth_user: accountPathPrefix(),
                 email: detectedEmail || undefined,
+                account_id: getBoundAccountId() || undefined,
                 source: "userscript",
             };
             const headers = { "Content-Type": "application/json" };
@@ -628,6 +663,7 @@
             } catch (_) {}
 
             if (resp.status === 200 && data.account_id) {
+                setBoundAccountId(data.account_id);
                 const validText =
                     data.session_valid === true
                         ? "登录态有效"

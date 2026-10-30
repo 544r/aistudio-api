@@ -10,7 +10,7 @@ import pytest
 from aistudio_api.api.app import app
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
-from aistudio_api.infrastructure.account.account_store import AccountMeta
+from aistudio_api.infrastructure.account.account_store import AccountMeta, AccountStore
 
 
 @pytest.fixture(autouse=True)
@@ -260,4 +260,101 @@ async def test_delete_expired_accounts_noop_when_none_expired():
     finally:
         runtime_state.account_service = original_service
         runtime_state.rotator = original_rotator
+        runtime_state.client = original_client
+
+
+@pytest.mark.asyncio
+async def test_detect_email_conflict_requires_confirmation(tmp_path, monkeypatch):
+    """探测到的邮箱与记录不一致时不得静默覆盖，返回冲突交由前端确认。"""
+    store = AccountStore(accounts_dir=tmp_path / "accounts_detect")
+    acc = store.save_account(
+        name="{{EMAIL_xzq5pepq}}",
+        email="{{EMAIL_xzq5pepq}}",
+        storage_state={"cookies": [{"name": "SID", "value": "sid"}]},
+    )
+    service = AccountService(store)
+
+    async def fake_email(_cookies, auth_user="0"):
+        return "{{EMAIL_wsj3yhqf}}"
+
+    async def fake_tier(_cookies, auth_user="0"):
+        return "Pro"
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_email", fake_email
+    )
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_benefit_tier", fake_tier
+    )
+
+    original_service = runtime_state.account_service
+    original_client = runtime_state.client
+    runtime_state.account_service = service
+    runtime_state.client = None
+    try:
+        async with _client() as client:
+            resp = await client.post(f"/api/accounts/{acc.id}/detect-email")
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["detected_email"] == "{{EMAIL_wsj3yhqf}}".lower()
+            assert data["email_conflict"] is True
+            assert data["email_updated"] is False
+            # 未确认时保留原值
+            assert data["email"] == "{{EMAIL_xzq5pepq}}"
+
+            forced = await client.post(
+                f"/api/accounts/{acc.id}/detect-email?force=true"
+            )
+
+            assert forced.status_code == 200
+            forced_data = forced.json()
+            assert forced_data["email_conflict"] is False
+            assert forced_data["email_updated"] is True
+            assert forced_data["email"] == "{{EMAIL_wsj3yhqf}}".lower()
+            # 名称当初等于旧邮箱，应跟随邮箱一起更新
+            assert forced_data["name"] == "{{EMAIL_wsj3yhqf}}".lower()
+    finally:
+        runtime_state.account_service = original_service
+        runtime_state.client = original_client
+
+
+@pytest.mark.asyncio
+async def test_detect_email_never_reads_unbound_browser_session(tmp_path, monkeypatch):
+    """浏览器会话未绑定该账号时，不允许从当前页面提取邮箱。"""
+    store = AccountStore(accounts_dir=tmp_path / "accounts_unbound")
+    acc = store.save_account(
+        name="account",
+        email=None,
+        storage_state={"cookies": [{"name": "SID", "value": "sid"}]},
+    )
+    service = AccountService(store)
+
+    async def fake_email(_cookies, auth_user="0"):
+        return None
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_account_email", fake_email
+    )
+
+    session = MagicMock()
+    session.page = MagicMock()
+    session._auth_file = "data/accounts/some_other_account/auth.json"
+    session.extract_account_email = MagicMock(return_value="{{EMAIL_t6dnimxs}}")
+    session.switch_auth = MagicMock()
+
+    original_service = runtime_state.account_service
+    original_client = runtime_state.client
+    runtime_state.account_service = service
+    runtime_state.client = MagicMock(_session=session)
+    try:
+        async with _client() as client:
+            resp = await client.post(f"/api/accounts/{acc.id}/detect-email")
+
+        assert resp.status_code == 200
+        # 当前页属于别的账号，绝不能把它的邮箱写进来
+        session.extract_account_email.assert_not_called()
+        assert resp.json()["email"] is None
+    finally:
+        runtime_state.account_service = original_service
         runtime_state.client = original_client

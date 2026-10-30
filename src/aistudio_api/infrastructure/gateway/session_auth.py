@@ -155,12 +155,16 @@ async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
         return False
 
 
-async def extract_account_email(page: CDPPage | None) -> str | None:
-    """Extract authenticated Google email from page DOM."""
+async def extract_account_email(
+    page: CDPPage | None, auth_user: str = "0"
+) -> str | None:
+    """Extract authenticated Google email from page DOM (bound to u/{auth_user})."""
     if page is None or page.is_closed():
         return None
     try:
-        raw_email = await page.evaluate(EXTRACT_EMAIL_JS)
+        raw_email = await page.evaluate(
+            EXTRACT_EMAIL_JS, args={"auth_user": str(auth_user or "0")}
+        )
         if raw_email and isinstance(raw_email, str) and "@" in raw_email:
             return raw_email.strip()
     except Exception as e:
@@ -264,7 +268,7 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
     discovered_email: str | None = None
 
     if not expected_email and is_on_correct_user:
-        discovered_email = await extract_account_email(page)
+        discovered_email = await extract_account_email(page, auth_user=auth_user)
         if discovered_email:
             log.info(
                 "已自动识别账号 %s (u/%s) 登录邮箱: %s",

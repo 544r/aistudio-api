@@ -172,7 +172,9 @@ async def test_import_bundle_flow(tmp_path, monkeypatch):
         routes_accounts, "probe_account_benefit_tier", AsyncMock(return_value="Free")
     )
     monkeypatch.setattr(
-        routes_accounts, "probe_account_email", AsyncMock(return_value="mock@example.com")
+        routes_accounts,
+        "probe_account_email",
+        AsyncMock(return_value="mock@example.com"),
     )
     store = AccountStore(accounts_dir=tmp_path / "accounts")
     svc = AccountService(store)
@@ -223,7 +225,7 @@ def test_mask_email():
 
 
 def test_update_account_email(tmp_path):
-    """测试自动识别并更新账号邮箱。"""
+    """测试自动识别并更新账号邮箱，以及名称跟随行为。"""
     from aistudio_api.infrastructure.account.account_store import AccountStore
 
     store = AccountStore(accounts_dir=tmp_path / "accounts_test")
@@ -240,9 +242,50 @@ def test_update_account_email(tmp_path):
     reloaded = store.get_account(acc.id)
     assert reloaded is not None
     assert reloaded.email == "real_user@gmail.com"
+    # 手动起的名字不会被邮箱更新覆盖
+    assert reloaded.name == "Test"
 
     # 重复更新相同邮箱返回 False
     assert store.update_account_email(acc.id, "real_user@gmail.com") is False
+
+
+def test_update_account_email_follows_name_derived_from_email(tmp_path):
+    """名称当初就是由邮箱自动填的（name == 旧邮箱）时，邮箱变更要一起改。"""
+    from aistudio_api.infrastructure.account.account_store import AccountStore
+
+    store = AccountStore(accounts_dir=tmp_path / "accounts_name_sync")
+    acc = store.save_account(
+        name="{{EMAIL_3oifr43g}}",
+        email="{{EMAIL_3oifr43g}}",
+        storage_state={"cookies": []},
+    )
+
+    assert store.update_account_email(acc.id, "{{EMAIL_ldn4ux2b}}") is True
+
+    reloaded = store.get_account(acc.id)
+    assert reloaded is not None
+    assert reloaded.email == "{{EMAIL_ldn4ux2b}}"
+    # 否则界面上就会出现「标题一个邮箱、下面一行另一个邮箱」
+    assert reloaded.name == "{{EMAIL_ldn4ux2b}}"
+
+
+def test_update_account_email_keeps_custom_name(tmp_path):
+    """用户手动改过的名字（不等于旧邮箱）在邮箱变更时必须保留。"""
+    from aistudio_api.infrastructure.account.account_store import AccountStore
+
+    store = AccountStore(accounts_dir=tmp_path / "accounts_custom_name")
+    acc = store.save_account(
+        name="主账号 (Pro)",
+        email="{{EMAIL_ryj5tfn2}}",
+        storage_state={"cookies": []},
+    )
+
+    assert store.update_account_email(acc.id, "{{EMAIL_ldn4ux2b}}") is True
+
+    reloaded = store.get_account(acc.id)
+    assert reloaded is not None
+    assert reloaded.email == "{{EMAIL_ldn4ux2b}}"
+    assert reloaded.name == "主账号 (Pro)"
 
 
 def test_parse_benefit_tier_and_update_account_tier(tmp_path):

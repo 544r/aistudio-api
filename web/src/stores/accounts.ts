@@ -287,12 +287,27 @@ export const useAccountsStore = defineStore('accounts', () => {
   async function detectAccountEmail(id: string) {
     const toast = useToastStore()
     try {
-      const res = await accountsApi.detectEmail(id)
+      let res = await accountsApi.detectEmail(id)
+      if (res.email_conflict && res.detected_email) {
+        const confirmed = confirm(
+          '检测到的邮箱与现有记录不一致，可能是浏览器里还登录着另一个账号。\n\n' +
+            `现有记录：${res.email || '（空）'}\n` +
+            `探测结果：${res.detected_email}\n\n` +
+            '是否用探测结果覆盖现有记录？',
+        )
+        if (confirmed) {
+          res = await accountsApi.detectEmail(id, true)
+        }
+      }
       const tierSuffix = res.tier ? ` · 等级: ${res.tier}` : ''
-      if (res.email) {
-        toast.success(`已成功识别账号邮箱: ${res.email}${tierSuffix}`)
+      if (res.email_updated) {
+        toast.success(`已更新账号邮箱: ${res.email}${tierSuffix}`)
+      } else if (res.email_conflict) {
+        toast.info(`已保留原邮箱${res.email ? `: ${res.email}` : ''}${tierSuffix}`)
+      } else if (res.email) {
+        toast.success(`账号邮箱: ${res.email}${tierSuffix}`)
       } else {
-        toast.info(`未在当前页面识别到有效邮箱${tierSuffix}`)
+        toast.info(`未能识别到有效邮箱${tierSuffix}`)
       }
       await fetchAll()
       return res

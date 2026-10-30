@@ -7,7 +7,7 @@ import contextlib
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path as FastApiPath
+from fastapi import APIRouter, Body, Depends, HTTPException, Path as FastApiPath, Query
 from pydantic import BaseModel, Field
 
 from aistudio_api.api.dependencies import (
@@ -55,6 +55,12 @@ class AccountHealthResponse(BaseModel):
     valid: int
     expired: list[str]
     unknown: list[str]
+
+
+class DetectEmailResponse(AccountResponse):
+    detected_email: str | None = None
+    email_updated: bool = False
+    email_conflict: bool = False
 
 
 def to_account_response(account: AccountMeta) -> AccountResponse:
@@ -347,29 +353,65 @@ async def push_cookies(
         auth_user = "0"
 
     accounts = account_service.list_accounts()
-    email = (req.email or "").strip().lower() or None
+    reported_email = (req.email or "").strip().lower() or None
+    email = reported_email
     target: AccountMeta | None = None
+    candidate = account_service.get_account(req.account_id) if req.account_id else None
+
+    # 脚本侧的邮箱来自页面启发式探测，多账号浏览器里可能指向另一个号。
+    # 未绑定、绑定账号没有邮箱、或绑定邮箱与上报值冲突时，用 Cookie 罐的
+    # 实际归属来仲裁；绑定与上报一致时跳过探测，推送保持低延迟。
+    need_probe = (
+        candidate is None
+        or not (candidate.email or "").strip()
+        or bool(reported_email and candidate.email.strip().lower() != reported_email)
+    )
+    if need_probe:
+        with contextlib.suppress(Exception):
+            probed_email = (
+                str((await probe_account_email(cookie_dict, auth_user=auth_user)) or "")
+                .strip()
+                .lower()
+                or None
+            )
+            if probed_email:
+                if reported_email and probed_email != reported_email:
+                    log.warning(
+                        "上报邮箱与 Cookie 实际归属不一致: 上报 %s, 实际 %s，按实际归属处理",
+                        mask_email(reported_email),
+                        mask_email(probed_email),
+                    )
+                email = probed_email
+
     if req.account_id:
-        target = account_service.get_account(req.account_id)
-        if target is None:
-            log.warning("拒绝浏览器 Cookie 推送: 指定的账号不存在 (%s)", req.account_id)
-            raise HTTPException(status_code=404, detail="指定的账号不存在")
-    elif email:
-        matches = [a for a in accounts if (a.email or "").lower() == email]
+        if candidate is None:
+            log.warning(
+                "推送绑定的账号 %s 已不存在，回退按邮箱与 Cookie 归属重新匹配",
+                req.account_id,
+            )
+        elif candidate.email and email and candidate.email.strip().lower() != email:
+            # 绑定的账号和本次 Cookie 属于不同的 Google 账号：忽略绑定，不能把
+            # 另一台浏览器的 Cookie 顶到已有账号上（跨号覆盖之后无法自动还原）。
+            log.warning(
+                "推送绑定与 Cookie 归属不一致: 绑定账号 %s 属于 %s，本次 Cookie 属于 %s，已忽略绑定",
+                candidate.id,
+                mask_email(candidate.email),
+                mask_email(email),
+            )
+        else:
+            target = candidate
+
+    if target is None and email:
+        matches = [a for a in accounts if (a.email or "").strip().lower() == email]
         if matches:
             same_user = [a for a in matches if (a.auth_user or "0") == auth_user]
             target = (same_user or matches)[0]
-    if target is None and email is None:
+
+    if target is not None and email and not (target.email or "").strip():
+        # 绑定命中但该账号还没记录邮箱：用本次 Cookie 的归属补齐
         with contextlib.suppress(Exception):
-            probed_email = await probe_account_email(cookie_dict, auth_user=auth_user)
-            if probed_email:
-                email = probed_email
-                matches = [a for a in accounts if (a.email or "").lower() == email]
-                if matches:
-                    same_user = [
-                        a for a in matches if (a.auth_user or "0") == auth_user
-                    ]
-                    target = (same_user or matches)[0]
+            account_service.update_account_email(target.id, email)
+            target = account_service.get_account(target.id) or target
 
     effective_email = email or (target.email if target is not None else None)
     if is_blocked_email(effective_email):
@@ -613,13 +655,19 @@ async def activate_account(
     return to_account_response(account)
 
 
-@router.post("/{account_id}/detect-email", response_model=AccountResponse)
+@router.post("/{account_id}/detect-email", response_model=DetectEmailResponse)
 async def detect_account_email(
     account_id: str = FastApiPath(..., pattern=r"^[a-zA-Z0-9_\-\.@]+$"),
+    force: bool = Query(default=False, description="确认用探测值覆盖已记录的邮箱"),
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
-) -> AccountResponse:
-    """自动提取并更新指定账号的真实邮箱与订阅权益等级（优先无感 HTTP 探测，必要时回退受控浏览器）。"""
+) -> DetectEmailResponse:
+    """识别指定账号的真实邮箱与订阅等级。
+
+    邮箱只从「该账号自己的凭据」或「确已绑定该账号的浏览器会话」读取：
+    - 不再把当前打开的任意页面当成目标账号（多账号浏览器会读到别的号）；
+    - 探测值与已记录邮箱不一致时不静默覆盖，返回 email_conflict 交由前端确认。
+    """
     import json
 
     acc = account_service.get_account(account_id)
@@ -628,32 +676,12 @@ async def detect_account_email(
 
     target_auth = account_service.get_account_auth_path(account_id)
     browser_session = runtime_state.client._session if runtime_state.client else None
+    auth_user = acc.auth_user or "0"
     email: str | None = None
     detected_tier: str | None = None
 
-    # 1. 若受控浏览器当前正好处于该账号上下文，优先直接从当前页面提取（免切号）
-    is_current_session = bool(
-        browser_session is not None
-        and browser_session.page is not None
-        and (
-            not target_auth
-            or not getattr(browser_session, "_auth_file", None)
-            or str(target_auth) == browser_session._auth_file
-        )
-    )
-    if is_current_session and browser_session is not None:
-        with contextlib.suppress(Exception):
-            email = await browser_session.extract_account_email()
-        if hasattr(browser_session, "extract_account_tier"):
-            with contextlib.suppress(Exception):
-                detected_tier = await browser_session.extract_account_tier()
-
-    # 2. 通过 auth.json 凭据执行高速 HTTP 探测（无需切号，即使浏览器休眠也可用）
-    if (
-        (not email or not detected_tier or detected_tier == "Free")
-        and target_auth
-        and target_auth.is_file()
-    ):
+    # 1. 优先用该账号自己的 auth.json 做 HTTP 探测：无需切号，也不会读到别人的页面
+    if target_auth and target_auth.is_file():
         try:
             auth_data = json.loads(target_auth.read_text(encoding="utf-8"))
             raw_cookies = auth_data.get("cookies") or []
@@ -663,33 +691,66 @@ async def detect_account_email(
                 if isinstance(c, dict) and c.get("name")
             }
             if cookie_dict:
-                if not email:
-                    email = await probe_account_email(
-                        cookie_dict, auth_user=acc.auth_user or "0"
+                with contextlib.suppress(Exception):
+                    email = await probe_account_email(cookie_dict, auth_user=auth_user)
+                with contextlib.suppress(Exception):
+                    detected_tier = await probe_account_benefit_tier(
+                        cookie_dict, auth_user=auth_user
                     )
-                if not detected_tier or detected_tier == "Free":
-                    http_tier = await probe_account_benefit_tier(
-                        cookie_dict, auth_user=acc.auth_user or "0"
-                    )
-                    if (http_tier and http_tier != "Free") or not detected_tier:
-                        detected_tier = http_tier
         except Exception as e:
             log.debug("通过 HTTP 探测账号 %s 邮箱/等级失败: %s", account_id, e)
 
-    # 3. 若 HTTP 仍未取到邮箱且受控浏览器可用，回退切换浏览器会话提取
-    if not email and browser_session is not None and browser_session.page is not None:
-        if target_auth and str(target_auth) != browser_session._auth_file:
-            await browser_session.switch_auth(str(target_auth))
-        email = await browser_session.extract_account_email()
-        if (not detected_tier or detected_tier == "Free") and hasattr(
-            browser_session, "extract_account_tier"
-        ):
+    # 2. 页面提取只在受控浏览器确实绑定在该账号上时才允许
+    session_bound = bool(
+        browser_session is not None
+        and browser_session.page is not None
+        and target_auth
+        and str(target_auth) == getattr(browser_session, "_auth_file", None)
+    )
+    if session_bound and browser_session is not None:
+        if not email:
+            with contextlib.suppress(Exception):
+                email = await browser_session.extract_account_email()
+        if not detected_tier or detected_tier == "Free":
             with contextlib.suppress(Exception):
                 detected_tier = await browser_session.extract_account_tier()
 
-    if email:
-        account_service.update_account_email(account_id, email)
-        log.info("已自动识别并更新账号 %s 邮箱: %s", account_id, mask_email(email))
+    # 3. 仍然拿不到就显式切到该账号再读页面（明确切号，而不是猜当前页）
+    if (
+        not email
+        and target_auth
+        and browser_session is not None
+        and browser_session.page is not None
+    ):
+        with contextlib.suppress(Exception):
+            if str(target_auth) != getattr(browser_session, "_auth_file", None):
+                await browser_session.switch_auth(str(target_auth))
+            # 切号失败时页面可能还停在别的账号上，必须确认绑定后再读
+            if str(target_auth) == getattr(browser_session, "_auth_file", None):
+                email = await browser_session.extract_account_email()
+        if not detected_tier or detected_tier == "Free":
+            with contextlib.suppress(Exception):
+                detected_tier = await browser_session.extract_account_tier()
+
+    detected = (email or "").strip().lower() or None
+    stored = (acc.email or "").strip().lower() or None
+    conflict = bool(detected and stored and detected != stored)
+
+    email_updated = False
+    if detected and (not conflict or force):
+        email_updated = account_service.update_account_email(account_id, detected)
+        if email_updated:
+            log.info(
+                "已自动识别并更新账号 %s 邮箱: %s", account_id, mask_email(detected)
+            )
+    elif conflict:
+        # 已有记录且探测值不同：大概率是读到了同浏览器的另一个账号，先别改
+        log.warning(
+            "账号 %s 探测邮箱 %s 与记录 %s 不一致，已保留原值等待确认",
+            account_id,
+            mask_email(detected or ""),
+            mask_email(stored or ""),
+        )
 
     if detected_tier:
         account_service.update_account_tier(account_id, detected_tier)
@@ -698,7 +759,12 @@ async def detect_account_email(
     acc = account_service.get_account(account_id)
     if not acc:
         raise HTTPException(status_code=404, detail="账号不存在")
-    return to_account_response(acc)
+    return DetectEmailResponse(
+        **to_account_response(acc).model_dump(),
+        detected_email=detected,
+        email_updated=email_updated,
+        email_conflict=conflict and not force,
+    )
 
 
 @router.post("/{account_id}/detect-tier", response_model=AccountResponse)

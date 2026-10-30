@@ -13,6 +13,7 @@ import type {
   ApplyPresetResponse,
   AccountHealthCheckResponse,
   DeleteExpiredAccountsResponse,
+  DetectEmailResponse,
   CookiePushHistoryResponse,
 } from '@/types'
 
@@ -36,10 +37,11 @@ export const accountsApi = {
       method: 'POST',
     })
   },
-  detectEmail(id: string): Promise<Account> {
-    return request<Account>(`/api/accounts/${id}/detect-email`, {
-      method: 'POST',
-    })
+  detectEmail(id: string, force = false): Promise<DetectEmailResponse> {
+    return request<DetectEmailResponse>(
+      `/api/accounts/${id}/detect-email${force ? '?force=true' : ''}`,
+      { method: 'POST' },
+    )
   },
   detectTier(id: string): Promise<Account> {
     return request<Account>(`/api/accounts/${id}/detect-tier`, {
