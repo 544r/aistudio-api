@@ -19,6 +19,7 @@ from aistudio_api.application.api_service_gemini import classify_gemini_error_pa
 from aistudio_api.config import settings
 from aistudio_api.infrastructure.gateway.client import AIStudioClient
 from aistudio_api.infrastructure.gateway.model_defaults import (
+    apply_configured_timeouts,
     get_configured_logging_settings,
 )
 from aistudio_api.infrastructure.utils.logger import (
@@ -43,6 +44,15 @@ from .state import runtime_state
 _log_cfg = get_configured_logging_settings()
 setup_logging(str(_log_cfg.get("level", "INFO")))
 logger = get_logger("server")
+
+# config.yaml 里的 timeouts 段优先于环境变量默认值（控制台可改、重启后保留）
+_timeout_overrides = apply_configured_timeouts()
+if _timeout_overrides:
+    logger.info(
+        "已应用配置文件超时覆盖: 流式 %ss / 非流式 %ss",
+        settings.timeout_stream,
+        settings.timeout_replay,
+    )
 
 # Dump 会把请求头与查询参数原样落盘；管理密码、API Key 与 Cookie 会话票
 # 不应出现在可下载的调试文件里，统一打码。

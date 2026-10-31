@@ -360,25 +360,43 @@ def _default_config() -> dict[str, object]:
                 "default_limit": 50,
             },
             "Pro": {
-                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 50},
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 50,
+                },
                 "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 150},
                 "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 50},
-                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 50},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 50,
+                },
                 "default_limit": 50,
             },
             "Ultra": {
-                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 250},
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 250,
+                },
                 "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 1500},
                 "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 250},
-                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 250},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 250,
+                },
                 "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 50},
                 "default_limit": 250,
             },
             "Ultra_20X": {
-                "argon_models": {"match": {"contains": ["argon", "gemini-4"]}, "daily_limit": 1000},
+                "argon_models": {
+                    "match": {"contains": ["argon", "gemini-4"]},
+                    "daily_limit": 1000,
+                },
                 "flash_models": {"match": {"contains": ["flash"]}, "daily_limit": 5000},
                 "pro_models": {"match": {"contains": ["pro"]}, "daily_limit": 1000},
-                "image_models": {"match": {"contains": ["image", "imagen"]}, "daily_limit": 1000},
+                "image_models": {
+                    "match": {"contains": ["image", "imagen"]},
+                    "daily_limit": 1000,
+                },
                 "video_models": {"match": {"contains": ["veo"]}, "daily_limit": 200},
                 "default_limit": 1000,
             },
@@ -648,6 +666,81 @@ def update_configured_logging_settings(
     )
     invalidate_config_cache()
     return logging_dict
+
+
+# ─── 请求超时（运行时可改，落盘到 config.yaml 的 timeouts 段） ───
+_TIMEOUT_MIN_S = 5
+_TIMEOUT_MAX_S = 86400
+
+
+def _clamp_timeout_seconds(value: object) -> int | None:
+    try:
+        seconds = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return max(_TIMEOUT_MIN_S, min(_TIMEOUT_MAX_S, seconds))
+
+
+def get_configured_timeouts(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, int]:
+    """读取 config.yaml 中 timeouts 段的超时覆盖值。"""
+    config = _load_yaml_config(_resolve_config_path(config_path))
+    raw = config.get("timeouts")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, int] = {}
+    stream = _clamp_timeout_seconds(raw.get("stream"))
+    replay = _clamp_timeout_seconds(raw.get("replay"))
+    if stream is not None:
+        result["stream"] = stream
+    if replay is not None:
+        result["replay"] = replay
+    return result
+
+
+def apply_configured_timeouts(
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, int]:
+    """把 config.yaml 里的超时覆盖应用到运行时 settings（启动时调用）。"""
+    from aistudio_api.config import settings
+
+    overrides = get_configured_timeouts(config_path)
+    if "stream" in overrides:
+        settings.timeout_stream = overrides["stream"]
+    if "replay" in overrides:
+        settings.timeout_replay = overrides["replay"]
+    return overrides
+
+
+def update_configured_timeouts(
+    stream: int | None = None,
+    replay: int | None = None,
+    config_path: str | os.PathLike[str] | None = None,
+) -> dict[str, int]:
+    """更新 config.yaml 中的 timeouts 段并刷新缓存。"""
+    resolved_path = _resolve_config_path(config_path)
+    content = (
+        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
+    )
+    parsed = yaml.safe_load(content) or {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    raw_timeouts = parsed.get("timeouts")
+    timeouts = dict(raw_timeouts) if isinstance(raw_timeouts, dict) else {}
+    if stream is not None:
+        timeouts["stream"] = _clamp_timeout_seconds(stream)
+    if replay is not None:
+        timeouts["replay"] = _clamp_timeout_seconds(replay)
+
+    parsed["timeouts"] = timeouts
+    resolved_path.write_text(
+        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    invalidate_config_cache()
+    return {k: int(v) for k, v in timeouts.items() if isinstance(v, int)}
 
 
 # ─── 订阅层级每日软额度 (Tier Quotas) 与预设方案 (Presets) ───

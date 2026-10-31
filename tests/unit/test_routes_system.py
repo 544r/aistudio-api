@@ -115,3 +115,87 @@ async def test_rotation_status_and_clear_cooldown():
         )
         assert resp_clear.status_code == 200
         mock_rotator.clear_cooldown.assert_called_once_with("acc_1", model=None)
+
+
+@pytest.mark.asyncio
+async def test_update_timeouts_config_applies_and_persists(tmp_path, monkeypatch):
+    """PUT /config/timeouts 立即生效并写入 config.yaml 的 timeouts 段。"""
+    import yaml
+
+    from aistudio_api.config import settings
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\n", encoding="utf-8")
+    monkeypatch.setenv("AISTUDIO_CONFIG_FILE", str(config_path))
+    original_stream = settings.timeout_stream
+    original_replay = settings.timeout_replay
+    try:
+        async with _client() as client:
+            resp = await client.put(
+                "/config/timeouts", json={"stream": 1800, "replay": 900}
+            )
+        assert resp.status_code == 200
+        assert resp.json()["timeout_stream"] == 1800
+        assert resp.json()["timeout_replay"] == 900
+        assert settings.timeout_stream == 1800
+        assert settings.timeout_replay == 900
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["timeouts"] == {"stream": 1800, "replay": 900}
+
+        async with _client() as client:
+            out_of_range = await client.put("/config/timeouts", json={"stream": 0})
+            empty = await client.put("/config/timeouts", json={})
+        assert out_of_range.status_code == 400
+        assert empty.status_code == 400
+    finally:
+        settings.timeout_stream = original_stream
+        settings.timeout_replay = original_replay
+
+
+def test_apply_configured_timeouts_reads_yaml(tmp_path):
+    """启动时从 config.yaml 读取超时覆盖并写入 settings。"""
+    from aistudio_api.config import settings
+    from aistudio_api.infrastructure.gateway.model_defaults import (
+        apply_configured_timeouts,
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "timeouts:\n  stream: 1200\n  replay: 300\n", encoding="utf-8"
+    )
+    original_stream = settings.timeout_stream
+    original_replay = settings.timeout_replay
+    try:
+        overrides = apply_configured_timeouts(config_path)
+        assert overrides == {"stream": 1200, "replay": 300}
+        assert settings.timeout_stream == 1200
+        assert settings.timeout_replay == 300
+    finally:
+        settings.timeout_stream = original_stream
+        settings.timeout_replay = original_replay
+
+
+@pytest.mark.asyncio
+async def test_update_timeouts_keeps_runtime_value_when_config_unwritable(monkeypatch):
+    """配置文件只读时，超时仍在当前进程立即生效，并明确返回未持久化。"""
+    from aistudio_api.config import settings
+
+    def boom(**_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(
+        "aistudio_api.infrastructure.gateway.model_defaults.update_configured_timeouts",
+        boom,
+    )
+    original_stream = settings.timeout_stream
+    try:
+        async with _client() as client:
+            resp = await client.put("/config/timeouts", json={"stream": 900})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["persisted"] is False
+        assert data["timeout_stream"] == 900
+        assert settings.timeout_stream == 900
+    finally:
+        settings.timeout_stream = original_stream

@@ -302,6 +302,7 @@ async def get_system_config() -> dict[str, object]:
         "proxy_configured": bool(settings.proxy_url),
         "auth_enabled": web_auth_enabled(),
         "timeout_stream": settings.timeout_stream,
+        "timeout_replay": settings.timeout_replay,
         "yaml_content": yaml_content,
         "log_level": get_log_level(),
         "dump_requests": is_dump_requests_enabled(),
@@ -391,6 +392,58 @@ class LoggingConfigRequest(BaseModel):
     dump_requests: bool | None = None
     dump_to_file: bool | None = None
     dump_dir: str | None = None
+
+
+class TimeoutsConfigRequest(BaseModel):
+    stream: int | None = None
+    replay: int | None = None
+
+
+@protected_router.put("/config/timeouts")
+async def update_timeouts_config(req: TimeoutsConfigRequest) -> dict[str, object]:
+    """更新流式/非流式请求超时，立即生效并持久化到 config.yaml。"""
+    from aistudio_api.config import settings
+    from aistudio_api.infrastructure.gateway.model_defaults import (
+        _TIMEOUT_MAX_S,
+        _TIMEOUT_MIN_S,
+        update_configured_timeouts,
+    )
+
+    if req.stream is None and req.replay is None:
+        raise HTTPException(400, detail="至少提供一个超时值（stream 或 replay）")
+
+    for label, value in (("stream", req.stream), ("replay", req.replay)):
+        if value is not None and not (_TIMEOUT_MIN_S <= value <= _TIMEOUT_MAX_S):
+            raise HTTPException(
+                400,
+                detail=(f"{label} 超时必须在 {_TIMEOUT_MIN_S}~{_TIMEOUT_MAX_S} 秒之间"),
+            )
+
+    if req.stream is not None:
+        settings.timeout_stream = req.stream
+    if req.replay is not None:
+        settings.timeout_replay = req.replay
+
+    persisted = True
+    try:
+        update_configured_timeouts(stream=req.stream, replay=req.replay)
+    except Exception as e:
+        # 配置文件可能是只读挂载：运行期仍然生效，只是重启后会回落到旧值
+        persisted = False
+        logger.warning("超时设置已生效但持久化失败（配置文件不可写）: %s", e)
+
+    logger.info(
+        "请求超时已更新: 流式=%ss, 非流式=%ss (持久化=%s)",
+        settings.timeout_stream,
+        settings.timeout_replay,
+        persisted,
+    )
+    return {
+        "ok": True,
+        "persisted": persisted,
+        "timeout_stream": settings.timeout_stream,
+        "timeout_replay": settings.timeout_replay,
+    }
 
 
 @protected_router.put("/config/logging")
