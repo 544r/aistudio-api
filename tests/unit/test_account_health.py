@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from aistudio_api.application import account_health as health
 from aistudio_api.application.account_health import (
     check_all_accounts,
     probe_account_session,
@@ -188,3 +190,153 @@ async def test_check_all_accounts_updates_rotator(tmp_path, monkeypatch):
     assert ("acc_valid", False) in calls
     assert ("acc_expired", True) in calls
     assert all(account_id != "acc_disabled" for account_id, _ in calls)
+
+
+# ==================== RotateCookies 主动轮换 ====================
+
+
+def _rotate_auth_state(tmp_path, *, with_lsid: bool = True) -> Path:
+    cookies: list[dict[str, object]] = [
+        {"name": "SID", "value": "sid", "domain": ".google.com", "path": "/"},
+        {"name": "SAPISID", "value": "sapi", "domain": ".google.com", "path": "/"},
+        {
+            "name": "__Secure-1PSIDTS",
+            "value": "old-ts",
+            "domain": ".google.com",
+            "path": "/",
+        },
+    ]
+    if with_lsid:
+        cookies.append(
+            {
+                "name": "LSID",
+                "value": "lsid-root",
+                "domain": "accounts.google.com",
+                "path": "/",
+            }
+        )
+        cookies.append(
+            {
+                "name": "__Host-1PLSID",
+                "value": "host-plsid",
+                "domain": "accounts.google.com",
+                "path": "/",
+            }
+        )
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"cookies": cookies, "origins": []}), encoding="utf-8"
+    )
+    return auth_file
+
+
+@pytest.mark.asyncio
+async def test_rotate_account_cookies_success_writes_new_generation(
+    tmp_path, monkeypatch
+):
+    """RotateCookies 成功：新代次落盘 + server_rotated 标记。"""
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self):
+            self.headers = httpx.Headers(
+                {
+                    "set-cookie": "__Secure-1PSIDTS=sidts-fresh; Path=/; Domain=.google.com; Secure; HttpOnly"
+                }
+            )
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            FakeClient.last_url, FakeClient.last_headers = url, kw.get("headers")
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    auth_file = _rotate_auth_state(tmp_path)
+
+    changed = await health.rotate_account_cookies(auth_file)
+
+    assert changed == ["__Secure-1PSIDTS"]
+    assert "RotateCookies" in FakeClient.last_url
+    sent = FakeClient.last_headers["Cookie"]
+    assert "LSID=lsid-root" in sent and "SID=sid" in sent
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    by_name = {c["name"]: c["value"] for c in state["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "sidts-fresh"
+    assert state["server_rotated"] is True
+
+
+@pytest.mark.asyncio
+async def test_rotate_account_cookies_skips_without_lsid(tmp_path, monkeypatch):
+    """没有 LSID / __Host-*PLSID 时静默跳过，不发请求（防 Google 判异常）。"""
+    called = False
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            nonlocal called
+            called = True
+            raise AssertionError("不应发起请求")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    auth_file = _rotate_auth_state(tmp_path, with_lsid=False)
+
+    assert await health.rotate_account_cookies(auth_file) == []
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_rotate_account_cookies_failure_is_silent(tmp_path, monkeypatch):
+    """HTTP 非 200 / 网络异常都不抛出、不改文件（保养动作不构成判定）。"""
+
+    class FakeResp:
+        status_code = 403
+        headers = httpx.Headers({})
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    auth_file = _rotate_auth_state(tmp_path)
+    before = auth_file.read_text(encoding="utf-8")
+
+    assert await health.rotate_account_cookies(auth_file) == []
+    assert auth_file.read_text(encoding="utf-8") == before
+
+
+def test_rotate_cooldown_blocks_repeat_within_interval():
+    """频控：间隔内同账号不允许再次主动轮换，force 可越过（401 抢救用）。"""
+    health._rotate_cookies_at.clear()
+    assert health._rotate_cooldown_ok("acc_a") is True
+    health._note_rotate_done("acc_a")
+    assert health._rotate_cooldown_ok("acc_a") is False
+    assert health._rotate_cooldown_ok("acc_b") is True
+    assert health._rotate_cooldown_ok("acc_a", force=True) is True
+    health._rotate_cookies_at.clear()

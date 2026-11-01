@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -41,6 +43,136 @@ _LIST_MODELS_URL = (
     "https://alkalimakersuite-pa.clients6.google.com/$rpc/"
     "google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ListModels"
 )
+
+_ROTATE_COOKIES_URL = "https://accounts.google.com/RotateCookies"
+_ROTATE_COOKIES_BODY = '[null, "-1234567890", 0]'
+_ROTATE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
+# RotateCookies 的前置条件：accounts.google.com 的 host-only 会话根凭据
+# （油猴 v1.3.2 起随罐推送入库）。缺了它们硬调会被 Google 判异常，直接跳过。
+_ROTATE_REQUIRED_NAMES = ("LSID", "__Host-1PLSID", "__Host-3PLSID")
+# 保守间隔：同一账号最多每 6 小时主动轮换一次，规避 Google 的
+# RotateCookies 高频调用风控（参考 pg-bridge 的注释警告）。
+ROTATE_COOKIES_MIN_INTERVAL_S = 6 * 3600
+
+# 进程内轮换记账：account_id -> 上次成功轮换的 time.time()
+_rotate_cookies_at: dict[str, float] = {}
+
+
+def _build_rotate_cookie_header(state: dict[str, object]) -> tuple[str, str] | None:
+    """从 auth.json 里提取 RotateCookies 需要的 Cookie 头。
+
+    返回 (header, anchor_name)；没有 LSID / __Host-*PLSID 任一返回 None。
+    accounts.google.com 的 host-only Cookie 只随该域发送，这里原样拼全量头。
+    """
+    cookies: list[dict[str, object]] = (
+        state.get("cookies") if isinstance(state.get("cookies"), list) else []
+    )
+    by_name: dict[str, str] = {}
+    for item in cookies:
+        if isinstance(item, dict) and item.get("name"):
+            by_name.setdefault(str(item["name"]), str(item.get("value") or ""))
+    anchor = next((n for n in _ROTATE_REQUIRED_NAMES if by_name.get(n)), None)
+    if anchor is None:
+        return None
+    if not any(by_name.get(n) for n in ("SID", "__Secure-1PSID", "__Secure-3PSID")):
+        return None
+    # 只带 google.com 系的键值，避免把无关域的 Cookie 串进请求头
+    header = "; ".join(
+        f"{name}={value}"
+        for name, value in by_name.items()
+        if value
+        and (
+            name.startswith(("__Secure-", "__Host-"))
+            or name
+            in ("SID", "HSID", "SSID", "APISID", "SAPISID", "LSID", "ACCOUNT_CHOOSER")
+        )
+    )
+    return (header, anchor) if header else None
+
+
+async def rotate_account_cookies(auth_path: str | Path) -> list[str]:
+    """对一个账号执行 RotateCookies 主动轮换（pg-bridge 401 自愈的定时版）。
+
+    用 accounts.google.com 的长寿根凭据（LSID / __Host-*PLSID）向 Google 换一套
+    新的滚动代次（PSIDTS / SIDCC 等），并把 Set-Cookie 应用回 auth.json。给闲置
+    账号用的——它们没有浏览器保活，探活又基本不带轮换头，躺着时只有这条路能把
+    代次链续上，被切回来的瞬间就是新鲜的。
+
+    失败一律静默返回 []：这只是保养动作，不构成任何登录态判定。
+    """
+    target = Path(auth_path)
+    if not target.is_file():
+        return []
+    try:
+        state = json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("读取 %s 做 RotateCookies 失败: %s", target.name, exc)
+        return []
+    if not isinstance(state, dict):
+        return []
+
+    built = _build_rotate_cookie_header(state)
+    if built is None:
+        return []
+    header, anchor = built
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, proxy=settings.proxy_url) as client:
+            resp = await client.post(
+                _ROTATE_COOKIES_URL,
+                headers={
+                    "Cookie": header,
+                    "User-Agent": _ROTATE_USER_AGENT,
+                    "Content-Type": "application/json",
+                    "Origin": "https://accounts.google.com",
+                    "Referer": "https://accounts.google.com/RotateCookiesPage",
+                },
+                content=_ROTATE_COOKIES_BODY,
+            )
+    except Exception as exc:
+        logger.debug("账号 %s RotateCookies 请求失败: %s", target.name, exc)
+        return []
+
+    if resp.status_code != 200:
+        logger.debug(
+            "账号 %s RotateCookies 返回 HTTP %s（凭据根=%s）",
+            target.name,
+            resp.status_code,
+            anchor,
+        )
+        return []
+
+    changed = _persist_rotated_cookies(target, resp.headers.get_list("set-cookie"))
+    if changed:
+        logger.info(
+            "RotateCookies 已推进 %s 的会话 Cookie: %s",
+            target.name,
+            ", ".join(sorted(set(changed))),
+        )
+    return changed
+
+
+def _rotate_cooldown_ok(account_id: str, *, force: bool = False) -> bool:
+    """频控：同一账号距上次成功轮换不足间隔时不再发（force 供 401 抢救用）。"""
+    if force:
+        return True
+    last = _rotate_cookies_at.get(account_id, 0.0)
+    return time.time() - last >= ROTATE_COOKIES_MIN_INTERVAL_S
+
+
+def _note_rotate_done(account_id: str) -> None:
+    _rotate_cookies_at[account_id] = time.time()
+    # 防御性上限：进程极长运行时控制记账体积
+    if len(_rotate_cookies_at) > 4096:
+        for key in sorted(_rotate_cookies_at, key=_rotate_cookies_at.__getitem__)[
+            :-2048
+        ]:
+            _rotate_cookies_at.pop(key, None)
 
 
 def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[str]:
@@ -176,7 +308,15 @@ async def check_all_accounts(
             except Exception as exc:
                 logger.debug("读取账号 %s 的 Cookie 失败: %s", account_id, exc)
                 return None
-            return await probe_account_session(cookies, auth_user, persist_to=path)
+            status = await probe_account_session(cookies, auth_user, persist_to=path)
+            # 闲置账号的定时保养：探活基本不带轮换头，活跃账号又有浏览器保活，
+            # 只有这里的 RotateCookies 能让躺在池子里的号保持代次新鲜。
+            # 活跃账号跳过（浏览器罐是权威，纯 HTTP 轮换反而添乱）。
+            if account_id != active_id and _rotate_cooldown_ok(account_id):
+                with suppress(Exception):
+                    if await rotate_account_cookies(path):
+                        _note_rotate_done(account_id)
+            return status
 
     results = await asyncio.gather(
         *(_probe(account.id, account.auth_user) for account in accounts)
