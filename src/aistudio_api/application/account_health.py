@@ -148,7 +148,12 @@ async def rotate_account_cookies(auth_path: str | Path) -> list[str]:
             target.name,
             ", ".join(sorted(set(changed))),
         )
-        _record_rotation_event(target, source="rotate", reason="RotateCookies 401 抢救")
+        _record_rotation_event(
+            target,
+            source="rotate",
+            reason="RotateCookies 401 抢救",
+            changed_names=changed,
+        )
     return changed
 
 
@@ -175,11 +180,19 @@ def _record_rotation_event(
     *,
     source: str,
     reason: str,
+    changed_names: list[str] | None = None,
 ) -> None:
-    """把 auth.json 的代次推进记入轮换流水（键名+短指纹，不含值）。"""
+    """把 auth.json 的代次推进记入轮换流水（键名+短指纹，不含值）。
+
+    `changed_names` 是本次推进实际涉及的键（调用方从 apply_set_cookie_lines
+    拿得到）。不给时回退为全键快照对比（基线为内存里的上次事件，首次为空）。
+    两种方式都只产出 8 位短指纹。
+    """
     from aistudio_api.application.cookie_rotation_history import (
+        RotationChange,
         diff_cookie_values_as_changes,
         get_rotation_history,
+        short_digest,
         snapshot_cookie_values,
     )
 
@@ -189,15 +202,22 @@ def _record_rotation_event(
         if not isinstance(state, dict):
             return
         cookies = state.get("cookies")
+        snap = snapshot_cookie_values(cookies)
+        if changed_names is not None:
+            changes = [
+                RotationChange(name=name, domain="", after=short_digest(snap.get(name)))
+                for name in sorted(set(changed_names))
+                if snap.get(name)
+            ]
+        else:
+            changes = diff_cookie_values_as_changes(None, snap)
         get_rotation_history().record(
             account_id=target.parent.name,
             source=source,
             kind="rotated",
             reason=reason,
             cookie_count=len(cookies) if isinstance(cookies, list) else 0,
-            changes=diff_cookie_values_as_changes(
-                None, snapshot_cookie_values(cookies)
-            ),
+            changes=changes,
         )
 
 
@@ -230,7 +250,12 @@ def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[st
         target.name,
         ", ".join(sorted(set(changed))),
     )
-    _record_rotation_event(target, source="probe", reason="探活响应 Set-Cookie 回写")
+    _record_rotation_event(
+        target,
+        source="probe",
+        reason="探活响应 Set-Cookie 回写",
+        changed_names=changed,
+    )
     return changed
 
 
