@@ -1008,3 +1008,36 @@ async def test_push_preserves_generation_when_server_rotated_itself(tmp_path):
     assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
     # 推送没有成为代次持有者（被保护了），但也不能留下过期标记
     assert "server_rotated" not in saved
+
+
+@pytest.mark.asyncio
+async def test_push_jar_with_accounts_domain_cookies_roundtrip():
+    """油猴 v1.3.1 起 accounts.google.com 域的 LSID / __Host-*PLSID 随罐推送。
+
+    这些是 RotateCookies 类自愈的原料；推送通道必须原样入库（真实 domain 保留），
+    不能因为域是 accounts.google.com 或前缀 __Host- 而丢弃。
+    """
+    target = _account()
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [
+        _cookie("SID", "sid-value"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("LSID", "lsid-value", domain="accounts.google.com"),
+        _cookie("__Host-1PLSID", "plsid-value", domain="accounts.google.com"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {
+        (c["name"], c.get("domain")): c["value"] for c in saved["cookies"]
+    }
+    assert by_name[("LSID", "accounts.google.com")] == "lsid-value"
+    assert by_name[("__Host-1PLSID", "accounts.google.com")] == "plsid-value"

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.3.0
+// @version      1.3.1
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -44,6 +44,9 @@
  * 8. 首次推送成功后脚本会记住服务端返回的 account_id（按「服务器 + u/N」保存），
  *    之后推送直接绑定该账号；页面邮箱只作提示，不再用于匹配账号，避免多账号
  *    浏览器把你个人浏览器里的账号推成别的号。
+ * 9. v1.3.1 起额外抓取 accounts.google.com 域的 LSID / __Host-*PLSID /
+ *    __Host-GAPS（Google 会话的长寿根凭据）。抓到后控制台日志会标
+ *    「含 RotateCookies 原料」；抓不到也不影响正常推送。
  *
  * 说明：
  * - 推送的是完整 Google 会话 Cookie 罐（含 SID / SAPISID / __Secure-*），
@@ -81,6 +84,17 @@
         "SSID",
     ];
 
+    // accounts.google.com 的 host-only 会话根凭据：RotateCookies 类自愈的原料。
+    // 它们只挂在 accounts.google.com 域下（LSID/__Host-*PLSID/__Host-GAPS），
+    // 按页面/端点 URL 查永远查不到，必须单独按 accounts 域查询。
+    const ACCOUNTS_URL = "https://accounts.google.com/";
+    const ACCOUNTS_PROBE_NAMES = [
+        "LSID",
+        "__Host-1PLSID",
+        "__Host-3PLSID",
+        "__Host-GAPS",
+    ];
+
     const DEFAULT_INTERVAL_MIN = 60;
     const PUSH_TIMEOUT_MS = 30000;
     const INITIAL_PUSH_DELAY_MS = 5000;
@@ -96,7 +110,7 @@
     const STORE_REFRESH_MIN = "ap_refresh_min";
     const STORE_LAST_REFRESH = "ap_last_refresh";
 
-    const SCRIPT_VERSION = "1.3.0";
+    const SCRIPT_VERSION = "1.3.1";
     const GITHUB_RAW_URL =
         "https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js";
     const UPDATE_FETCH_TIMEOUT_MS = 15000;
@@ -545,10 +559,42 @@
             res.cookies.filter((c) => isGoogleDomain(c.domain)).forEach((c) => addCookie(c, "byName"));
         }
 
+        // ④ accounts.google.com 域补查：LSID / __Host-*PLSID / __Host-GAPS 只存在于
+        // 该域，它们是 Google 会话的长寿根凭据，也是服务端将来做纯 HTTP 抢救
+        // （accounts.google.com/RotateCookies）的原料。抓不到不阻塞推送（历史上
+        // 一直没推它们也能用），抓到了服务端就多一条自愈路径。
+        let accountsHit = 0;
+        const accountsRes = await gmCookieList({ url: ACCOUNTS_URL });
+        if (!accountsRes.error) {
+            for (const c of accountsRes.cookies) {
+                if (!isGoogleDomain(c.domain) && !/^(accounts\.)?google\.com$/i.test(String(c.domain || ""))) continue;
+                addCookie(c, "accountsURL");
+                accountsHit += 1;
+            }
+        }
+        const stillMissing = ACCOUNTS_PROBE_NAMES.filter(
+            (n) => ![...byKey.values()].some((c) => c.name === n)
+        );
+        for (const name of stillMissing) {
+            const res = await gmCookieList({ name });
+            if (res.error) continue;
+            res.cookies
+                .filter((c) => {
+                    const d = String(c.domain || "").replace(/^\./, "").toLowerCase();
+                    return d === "accounts.google.com" || d.endsWith("google.com");
+                })
+                .forEach((c) => addCookie(c, "byName"));
+        }
+
         const finalCookies = [...byKey.values()].map(({ source, ...rest }) => rest);
+        const hasRotateMaterial = ACCOUNTS_PROBE_NAMES.some((n) =>
+            finalCookies.some((c) => c.name === n)
+        );
         log(
             `Cookie 收集: 端点=${req.error ? "失败" : req.cookies.length} | ` +
-                `页面=${page.error ? "失败" : page.cookies.length} | 合计 ${finalCookies.length} 条`
+                `页面=${page.error ? "失败" : page.cookies.length} | ` +
+                `accounts域=${accountsHit} | 合计 ${finalCookies.length} 条` +
+                (hasRotateMaterial ? "（含 RotateCookies 原料）" : "")
         );
         return finalCookies;
     }
