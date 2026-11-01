@@ -17,6 +17,7 @@ from aistudio_api.api.dependencies import (
 from aistudio_api.config import is_blocked_email
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
+    ROLLING_COOKIE_NAMES,
     build_storage_state_from_browser_cookies,
     merge_storage_states,
     missing_session_cookies,
@@ -34,6 +35,38 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 log = get_logger("accounts")
 
 router = APIRouter(prefix="/accounts")
+
+
+def _is_account_session_expired(runtime_state: RuntimeState, account_id: str) -> bool:
+    """该账号是否已被调度器判定为登录态失效。
+
+    用来决定推送能不能覆盖滚动代次凭据：服务端自己把链走死了才允许外部接管。
+    """
+    rotator = runtime_state.rotator
+    if rotator is None:
+        return False
+    try:
+        stats = rotator.get_account_stats(account_id)
+    except Exception:
+        return False
+    # 显式 is True/is False：测试替身的 MagicMock 属性 bool() 恒为 True，
+    # 会把“未判失效”误读成“已判失效”从而放行覆盖
+    expired = getattr(stats, "session_expired", None)
+    return expired is True
+
+
+def _has_server_rotated_cookies(existing_state: dict[str, object] | None) -> bool:
+    """auth.json 是否带有服务端推进过的滚动代次标记。
+
+    探活回写与浏览器落盘会打上 `"server_rotated": true`（见
+    account_health._persist_rotated_cookies 与 session_auth.save_browser_cookies）。
+    没有标记的 auth.json 里，滚动代次就是上次推送的原文——推送方才是最新代次
+    的持有者，此时保护 base 反而会把旧代次锁死。会话保活每次导航都会刷新代次，
+    因此活跃账号的标记几乎总是存在；标记在推送接受新代次后清除，回到未推进态。
+    """
+    if not isinstance(existing_state, dict):
+        return False
+    return existing_state.get("server_rotated") is True
 
 
 class AccountResponse(BaseModel):
@@ -460,7 +493,25 @@ async def push_cookies(
                     )
                     if isinstance(raw_existing, dict):
                         existing_state = raw_existing
-            merged_state = merge_storage_states(existing_state, storage_state)
+            # 滚动代次凭据（*PSIDTS / *PSIDRTS / SIDCC / *PSIDCC）不能盲目覆盖：
+            # 要覆盖的对象必须是“服务端自己推进过”的那份（探活回写 / 浏览器保活
+            # 落盘），否则会出现两边互相顶旧代次。判据是 auth.json 里的代次来源
+            # ——服务端从未推进过的账号（auth.json 就是上次推送的原文），推送值
+            # 天然是最新代次，应该接受；标记了 _server_rotated 的账号才保护。
+            keep_rolling: tuple[str, ...] = ()
+            if _has_server_rotated_cookies(existing_state) and not (
+                _is_account_session_expired(runtime_state, acc.id)
+            ):
+                keep_rolling = tuple(ROLLING_COOKIE_NAMES)
+            merged_state = merge_storage_states(
+                existing_state, storage_state, keep_base_names=keep_rolling
+            )
+            # 推送成为滚动代次的最新持有者：清除“服务端推进”标记，让下一次
+            # 浏览器/探活推进重新取得保护资格。
+            if "server_rotated" in merged_state:
+                merged_state = {
+                    k: v for k, v in merged_state.items() if k != "server_rotated"
+                }
             if acc.id == target.id:
                 merged_for_target = merged_state
             account_service.save_account_from_cookies(
@@ -498,8 +549,13 @@ async def push_cookies(
 
     async def _probe_session() -> bool | None:
         try:
+            # 用合并后的 jar 探活（而不是浏览器推来的那一份），并把探活响应里
+            # Google 下发的新一代滚动 Cookie 直接落盘，探活顺带完成一次向前轮换。
             return await probe_account_session(
-                probe_cookies, auth_user=target_auth_user, timeout=6.0
+                probe_cookies,
+                auth_user=target_auth_user,
+                timeout=6.0,
+                persist_to=account_service.get_account_auth_path(target.id),
             )
         except Exception as exc:
             log.debug("账号探活失败: %s", exc)

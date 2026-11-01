@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlencode
 
@@ -109,7 +110,7 @@ def restore_runtime_state():
 
 @pytest.fixture(autouse=True)
 def stub_probe(monkeypatch):
-    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0):
+    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0, persist_to=None):
         return True
 
     async def fake_tier(_cookies, auth_user="0"):
@@ -172,7 +173,7 @@ def test_build_storage_state_filters_non_google_and_tracking_cookies():
             _cookie("SID", "v"),
             _cookie("_ga", "x"),
             _cookie("_gcl_au", "x"),
-            _cookie("SIDCC", "x"),
+            _cookie("OSID", "x", domain="aistudio.google.com"),
             _cookie("foo", "x", domain=".example.com"),
             _cookie("bar", "x", domain=""),
         ]
@@ -180,6 +181,20 @@ def test_build_storage_state_filters_non_google_and_tracking_cookies():
     cookies = state["cookies"]
     assert isinstance(cookies, list)
     assert [c["name"] for c in cookies] == ["SID"]
+
+
+def test_build_storage_state_keeps_rolling_session_cookies():
+    """SIDCC / *PSIDCC 属于 Google 全域会话链路，导入时不能再当噪声丢掉。"""
+    state = build_storage_state_from_browser_cookies(
+        [
+            _cookie("SID", "v"),
+            _cookie("SIDCC", "sidcc_val"),
+            _cookie("__Secure-1PSIDCC", "cc1"),
+            _cookie("__Secure-1PSIDTS", "ts1"),
+        ]
+    )
+    names = {c["name"] for c in state["cookies"] if isinstance(c, dict)}
+    assert names == {"SID", "SIDCC", "__Secure-1PSIDCC", "__Secure-1PSIDTS"}
 
 
 def test_build_storage_state_keeps_same_name_on_different_domains():
@@ -201,7 +216,11 @@ def test_missing_session_cookies():
     # __Secure-*PSID 缺失在 Chrome 分区 Cookie 场景下是正常的，不再拒绝
     assert missing_session_cookies(["SID", "SAPISID"]) == []
     assert missing_session_cookies(["SID", "SAPISID", "__Secure-1PSIDTS"]) == []
-    assert missing_session_cookies(["SAPISID", "__Secure-1PSID"]) == ["SID"]
+    # 反向也成立：指纹浏览器 / GM_cookie 常常读不到 SID，但 __Secure-*PSID
+    # 是完全等价的长寿命会话凭据，不能据此拒绝一份本来可用的罐子
+    assert missing_session_cookies(["SAPISID", "__Secure-1PSID"]) == []
+    assert missing_session_cookies(["SAPISID", "__Secure-3PSID"]) == []
+    assert missing_session_cookies(["SAPISID", "__Secure-1PSIDTS"]) == ["SID"]
     assert missing_session_cookies(["SID", "__Secure-1PSID"]) == ["SAPISID"]
     assert missing_session_cookies([]) == ["SID", "SAPISID"]
 
@@ -496,7 +515,7 @@ async def test_push_cookies_skips_injection_without_browser():
 
 @pytest.mark.asyncio
 async def test_push_cookies_marks_session_invalid_when_probe_fails(monkeypatch):
-    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0):
+    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0, persist_to=None):
         return False
 
     monkeypatch.setattr(
@@ -896,3 +915,96 @@ async def test_push_cookies_skips_tier_probe_for_paid_account(monkeypatch):
     assert resp.status_code == 200
     assert calls == 0
     svc.update_account_tier.assert_not_called()
+
+
+def _rolling_auth_file(tmp_path, *, server_rotated: bool, ts_value: str) -> Path:
+    state: dict[str, object] = {
+        "cookies": [
+            {
+                "name": "SID",
+                "value": "sid",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": -1,
+                "secure": True,
+                "httpOnly": True,
+            },
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": ts_value,
+                "domain": ".google.com",
+                "path": "/",
+                "expires": -1,
+                "secure": True,
+                "httpOnly": True,
+            },
+        ],
+        "origins": [],
+    }
+    if server_rotated:
+        state["server_rotated"] = True
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(json.dumps(state), encoding="utf-8")
+    return auth_file
+
+
+@pytest.mark.asyncio
+async def test_push_overwrites_stale_generation_when_server_never_rotated(tmp_path):
+    """auth.json 只是上次推送的原文（无 server_rotated 标记）时接受推送的新代次。
+
+    场景：服务端探活还没来得及回写，磁盘上还是旧代次；推送方浏览器拿着最新
+    代次来。此时保护 base 会把旧代次锁死，等于亲手制造下一次 401。
+    """
+    target = _account()
+    svc = _mock_service([target])
+    svc.get_account_auth_path.return_value = _rolling_auth_file(
+        tmp_path, server_rotated=False, ts_value="old-gen"
+    )
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [
+        _cookie("SID", "sid"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("__Secure-1PSIDTS", "fresh-gen"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
+
+
+@pytest.mark.asyncio
+async def test_push_preserves_generation_when_server_rotated_itself(tmp_path):
+    """auth.json 带有 server_rotated 标记（探活/浏览器推进过）时保护服务端代次。"""
+    target = _account()
+    svc = _mock_service([target])
+    svc.get_account_auth_path.return_value = _rolling_auth_file(
+        tmp_path, server_rotated=True, ts_value="server-gen-9"
+    )
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [
+        _cookie("SID", "sid"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("__Secure-1PSIDTS", "browser-gen-7"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
+    # 推送没有成为代次持有者（被保护了），但也不能留下过期标记
+    assert "server_rotated" not in saved

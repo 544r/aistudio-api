@@ -13,6 +13,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_API_KEY,
     DEFAULT_EXT_BIN,
     DEFAULT_USER_AGENT,
+    ROLLING_COOKIE_NAMES,
     parse_benefit_tier_response,
 )
 from aistudio_api.infrastructure.browser.cdp_client import CDPPage
@@ -116,15 +117,46 @@ def get_aistudio_urls(
     return [AI_STUDIO_URL, AI_STUDIO_URL_FALLBACK]
 
 
-async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
-    """Inject cookies from auth_file into target page with session-conflict filtering."""
+# 注入时一律跳过的键：AI Studio 的站点级会话 ID 与浏览器上下文绑定，跨设备复用
+# 旧值反而容易被上游判成会话冲突，交给浏览器自己协商一个新的。
+# 注意 SIDCC / *PSIDCC 不在此列——它们属于 Google 全域会话链路，丢掉就等于把
+# 轮换起点交给一次未知的重新协商，见 cookie_parser.ROLLING_COOKIE_NAMES。
+_INJECTION_SKIPPED_COOKIE_NAMES = frozenset({"OSID", "__Secure-OSID"})
+
+
+async def load_cookies_to_page(
+    page: CDPPage, auth_file: str | None, *, preserve_rolling: bool = False
+) -> bool:
+    """Inject cookies from auth_file into the target page.
+
+    `preserve_rolling=True` 用于**同一账号**的热刷新（油猴推送覆盖、会话内重载）：
+    既不清空浏览器 Cookie 罐，也不覆盖罐里已有的滚动代次（`*PSIDTS` /
+    `*PSIDRTS` / `SIDCC` / `*PSIDCC`）。磁盘快照最多可能落后一个轮换周期，把旧
+    代次灌回正在工作的会话，等于主动向 Google 提交上一代凭据——上游判定重放后
+    返回 401，账号就被标记成“登录态失效”。长寿命凭据（SID / PSID / APISID 系）
+    仍照常覆盖，推送刷新登录根的目的不受影响。
+
+    换账号时必须走默认的 `preserve_rolling=False`：那是要整个罐子换掉，
+    否则会残留上一个账号的代次。
+    """
     if not auth_file or not Path(auth_file).is_file():
         return False
     page.account_auth_file = auth_file
     try:
-        with suppress(Exception):
-            await page.cdp.send("Network.clearBrowserCookies")
-            await page.cdp.send("Network.clearBrowserCache")
+        live_rolling: dict[str, str] = {}
+        if preserve_rolling:
+            with suppress(Exception):
+                live_rolling = {
+                    str(item.get("name") or ""): str(item.get("value") or "")
+                    for item in await page.get_cookies()
+                    if isinstance(item, dict)
+                    and str(item.get("name") or "") in ROLLING_COOKIE_NAMES
+                    and item.get("value")
+                }
+        else:
+            with suppress(Exception):
+                await page.cdp.send("Network.clearBrowserCookies")
+                await page.cdp.send("Network.clearBrowserCache")
 
         data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
         cookies = data.get("cookies") or []
@@ -134,20 +166,25 @@ async def load_cookies_to_page(page: CDPPage, auth_file: str | None) -> bool:
         cleaned_cookies = [
             c
             for c in cookies
-            if str(c.get("name") or "")
-            not in {
-                "OSID",
-                "__Secure-OSID",
-                "SIDCC",
-                "__Secure-1PSIDCC",
-                "__Secure-3PSIDCC",
-            }
+            if isinstance(c, dict)
+            and str(c.get("name") or "") not in _INJECTION_SKIPPED_COOKIE_NAMES
+            and str(c.get("name") or "") not in live_rolling
         ]
-        await page.set_cookies(cleaned_cookies or cookies)
+        if not cleaned_cookies:
+            # 磁盘里只剩被罐内实时值保护的滚动代次：注入等价于空操作，会话仍然可用
+            return bool(live_rolling)
+        await page.set_cookies(cleaned_cookies)
+        # set_cookies 会用本次注入列表重建 _cached_cookies，把被保护的实时
+        # 代次补回去，避免签名计算读到残缺的 Cookie 视图
+        cached = getattr(page, "_cached_cookies", None)
+        if isinstance(cached, dict):
+            cached.update(live_rolling)
         log.info(
-            "已向页面载入 %d 个 Cookie (auth_file=%s)",
-            len(cleaned_cookies or cookies),
+            "已向页面载入 %d 个 Cookie (auth_file=%s, 保留实时滚动代次 %d 项: %s)",
+            len(cleaned_cookies),
             auth_file,
+            len(live_rolling),
+            ", ".join(sorted(live_rolling)) or "-",
         )
         return True
     except Exception as e:
@@ -391,7 +428,12 @@ async def save_browser_cookies(
             with suppress(Exception):
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
-        atomic_write_json(auth_path, {"cookies": current_cookies, "origins": origins})
+        # 浏览器落盘的滚动代次由服务端（浏览器会话本身）推进过：打上标记，
+        # 推送合并时据此保护这份代次不被另一台浏览器的旧代次顶回。
+        atomic_write_json(
+            auth_path,
+            {"cookies": current_cookies, "origins": origins, "server_rotated": True},
+        )
         if quiet:
             log.debug("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
         else:

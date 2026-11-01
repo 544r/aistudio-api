@@ -114,6 +114,7 @@ class BrowserSession:
         self._cookie_save_lock = asyncio.Lock()
         self._cookie_save_task: asyncio.Task[None] | None = None
         self._cookie_fingerprints: dict[str, str] = {}
+        self._pending_rotations: list[str] = []
         self._transport = XHRStreamTransport()
         self._retiring_contexts: list[SessionContext] = []
         self._background_tasks: set[asyncio.Task[object]] = set()
@@ -280,7 +281,17 @@ class BrowserSession:
                 else:
                     new_page = await self._cdp_client.connect_page(block_assets=True)
 
-                await load_cookies_to_page(new_page, auth_file)
+                # 同一账号原地刷新（会话保活 / 401 自愈）时不能清空 Cookie 罐：
+                # 罐里的滚动代次永远不比 auth.json 快照旧，清空再灌回就是主动回滚
+                # 代次，Google 会把它当成重放并返回 401。
+                same_account = bool(
+                    old_context is not None
+                    and old_context.auth_file
+                    and old_context.auth_file == auth_file
+                )
+                await load_cookies_to_page(
+                    new_page, auth_file, preserve_rolling=same_account
+                )
                 await navigate_to_aistudio(
                     new_page,
                     auth_user=target_auth_user,
@@ -288,7 +299,9 @@ class BrowserSession:
                 )
 
                 async def _reload_cb(page: CDPPage) -> bool:
-                    return await load_cookies_to_page(page, auth_file)
+                    return await load_cookies_to_page(
+                        page, auth_file, preserve_rolling=True
+                    )
 
                 snap_key, base_template = await bootstrap_botguard_and_template(
                     new_page,
@@ -567,8 +580,18 @@ class BrowserSession:
         return await extract_account_tier(target, auth_user=auth_user)
 
     async def reload_current_account_cookies(self, page: CDPPage | None = None) -> bool:
+        """热刷新当前账号的 Cookie（油猴推送覆盖走这里）。
+
+        只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——推送来自另一台
+        浏览器，它那份代次可能已经比服务端落后一到几轮。
+        """
         target = page or (self.active_context.page if self.active_context else None)
-        return bool(target and await load_cookies_to_page(target, self._auth_file))
+        return bool(
+            target
+            and await load_cookies_to_page(
+                target, self._auth_file, preserve_rolling=True
+            )
+        )
 
     async def save_active_cookies(self, *, force: bool = True) -> bool:
         """Persist the active account's current browser cookies to auth.json."""
@@ -580,6 +603,19 @@ class BrowserSession:
             auth_file=ctx.auth_file,
             force=force,
         )
+
+    def note_pending_rotation(self, lines: list[str]) -> None:
+        """记录在途 $rpc 响应里捕获的 Set-Cookie 行（transport 层调用，纯内存）。
+
+        pg-bridge 的主力续命机制：Google 在 GenerateContent 等响应上推进 PSIDTS /
+        SIDCC 代次。这些行由 CDP 网络回调暂存到这里，_save_cookies 落盘前与浏览器
+        罐合并——回调上下文不允许 IO，且这些代次有时早于浏览器 jar 刷新，合并保证
+        新代次不丢。仅保留最近 32 条，防止泄漏增长。
+        """
+        if not lines:
+            return
+        self._pending_rotations.extend(lines)
+        del self._pending_rotations[:-32]
 
     async def _save_cookies(
         self,
@@ -605,6 +641,20 @@ class BrowserSession:
                     current_cookies = await target.get_cookies()
                 if not current_cookies or not _has_auth_cookies(current_cookies):
                     return False
+                # 在途响应捕获的 Set-Cookie 可能比浏览器 jar 里的代次更新
+                # （fetch 响应头先于 jar 序列化），落盘前合并进去
+                pending = list(self._pending_rotations)
+                if pending:
+                    from aistudio_api.infrastructure.account.cookie_parser import (
+                        apply_set_cookie_lines,
+                    )
+
+                    jar_state = {"cookies": current_cookies, "origins": []}
+                    merged, _ = apply_set_cookie_lines(jar_state, pending)
+                    merged_cookies = merged.get("cookies")
+                    if isinstance(merged_cookies, list) and merged_cookies:
+                        current_cookies = merged_cookies
+                    self._pending_rotations.clear()
                 fingerprint = _cookie_fingerprint(current_cookies)
                 key = str(auth_path)
                 if not force and self._cookie_fingerprints.get(key) == fingerprint:

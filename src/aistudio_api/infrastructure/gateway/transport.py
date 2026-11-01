@@ -53,6 +53,7 @@ def _ensure_net_trace(page: CDPPage) -> None:
             return
         entry["resp_status"] = int(str(data.get("status") or 0))
         entry["resp_at"] = time.time()
+        _harvest_rotation_set_cookies(data)
 
     def on_loading_failed(params: dict[str, object]) -> None:
         entry = page.rpc_net_requests.get(str(params.get("requestId") or ""))
@@ -73,6 +74,35 @@ def _ensure_net_trace(page: CDPPage) -> None:
         page.on_request(on_request)
         page.on_response(on_response)
         page.on_loading_failed(on_loading_failed)
+
+
+def _harvest_rotation_set_cookies(response: dict[str, object]) -> None:
+    """暂存 $rpc 响应头里的 Google 滚动 Cookie（pg-bridge 主力续命机制的等价物）。
+
+    在途请求（GenerateContent 等）都发生在浏览器页面里，CDP 的
+    Network.responseReceived 能看到响应头；Google 在这些响应上推进 PSIDTS /
+    SIDCC 代次。回调里绝不做 IO：先把 Set-Cookie 行挂到当前活跃上下文，落盘
+    交给既有的 60 秒回写循环与账号切换保存点。
+    """
+    from aistudio_api.api.state import runtime_state
+
+    if int(str(response.get("status") or 0)) != 200:
+        return
+    headers = response.get("headers")
+    if not isinstance(headers, dict):
+        return
+    lines = [
+        str(v)
+        for k, v in headers.items()
+        if str(k).lower() == "set-cookie" and str(v).strip()
+    ]
+    if not lines:
+        return
+    session = getattr(runtime_state.client, "session", None)
+    if session is None:
+        return
+    with suppress(Exception):
+        session.note_pending_rotation(lines)
 
 
 def _log_rpc_net_evidence(page: CDPPage, where: str) -> None:

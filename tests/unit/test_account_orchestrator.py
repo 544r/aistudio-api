@@ -200,9 +200,67 @@ async def test_try_switch_account_single_account_recovery():
 
 
 @pytest.mark.asyncio
-async def test_try_switch_account_session_expired_strictly_forbids_in_place_retry():
-    """登录态失效时严禁在原账号原地重试，无备用账号时直接返回 False。"""
+async def test_try_switch_account_401_repairs_session_in_place_before_giving_up():
+    """无处可切时的首次 401：先原地重导航自救（吃下 Google 的新一代滚动 Cookie）。"""
+    import time
     from unittest.mock import AsyncMock
+
+    from aistudio_api.application import account_orchestrator as orchestrator
+
+    mock_rotator = MagicMock(spec=AccountRotator)
+    mock_service = MagicMock(spec=AccountService)
+    mock_client = MagicMock(spec=AIStudioClient)
+    mock_client.session = MagicMock()
+
+    active_acc = AccountMeta(
+        id="acc_1",
+        name="Single Account",
+        email="single@gmail.com",
+        created_at="2026-01-01",
+    )
+    mock_service.get_active_account = MagicMock(return_value=active_acc)
+    mock_service.activate_account = AsyncMock(return_value=active_acc)
+    # 无备用账号：单账号模式下 401 只能自救
+    mock_rotator.get_next_account = AsyncMock(return_value=None)
+
+    orig_rotator = runtime_state.rotator
+    orig_service = runtime_state.account_service
+    orig_client = runtime_state.client
+    orig_selfheal = orchestrator._selfheal_at
+    orchestrator._selfheal_at = {}
+
+    try:
+        runtime_state.rotator = mock_rotator
+        runtime_state.account_service = mock_service
+        runtime_state.client = mock_client
+
+        result = await try_switch_account(
+            model="gemini-3.8-flash",
+            failed_account_id="acc_1",
+            is_auth_error=True,
+            is_session_expired=True,
+        )
+        assert result is True
+        mock_service.activate_account.assert_called_once_with(
+            "acc_1", mock_client.session
+        )
+        mock_rotator.record_session_expired.assert_not_called()
+        # 自愈已记账：同一账号在冷却窗口内不会反复重导航
+        assert orchestrator._selfheal_at["acc_1"] <= time.time()
+    finally:
+        runtime_state.rotator = orig_rotator
+        runtime_state.account_service = orig_service
+        runtime_state.client = orig_client
+        orchestrator._selfheal_at = orig_selfheal
+
+
+@pytest.mark.asyncio
+async def test_try_switch_account_session_expired_strictly_forbids_in_place_retry():
+    """自愈刚做过、仍然 401：确认救不回来，判登录态失效并严禁在原账号重试。"""
+    import time
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.application import account_orchestrator as orchestrator
 
     mock_rotator = MagicMock(spec=AccountRotator)
     mock_service = MagicMock(spec=AccountService)
@@ -223,6 +281,9 @@ async def test_try_switch_account_session_expired_strictly_forbids_in_place_retr
     orig_rotator = runtime_state.rotator
     orig_service = runtime_state.account_service
     orig_client = runtime_state.client
+    orig_selfheal = orchestrator._selfheal_at
+    # 冷却窗口内已经原地自救过一次
+    orchestrator._selfheal_at = {"acc_1": time.time()}
 
     try:
         runtime_state.rotator = mock_rotator
@@ -245,6 +306,7 @@ async def test_try_switch_account_session_expired_strictly_forbids_in_place_retr
         runtime_state.rotator = orig_rotator
         runtime_state.account_service = orig_service
         runtime_state.client = orig_client
+        orchestrator._selfheal_at = orig_selfheal
 
 
 @pytest.mark.asyncio
@@ -285,8 +347,10 @@ async def test_try_switch_account_session_expired_switches_to_healthy_account():
             is_session_expired=True,
         )
         assert result is True
-        # 仅禁用失效的 acc_1
-        mock_rotator.record_session_expired.assert_called_once_with(
+        # 有备用账号时不立刻拉黑 401 账号：只记短冷却，登录态交给后台探活仲裁
+        # （同批导入的账号经常一起到龄，误拉黑 24 小时会级联清空账号池）
+        mock_rotator.record_session_expired.assert_not_called()
+        mock_rotator.record_auth_error.assert_called_once_with(
             "acc_1", model="gemini-3.8-flash"
         )
         # 成功激活 acc_2
@@ -339,6 +403,7 @@ def test_account_stats_short_cooldown_sync():
     assert not stats.is_available("gemini-2.5-flash")
     rem3 = stats.get_cooldown_remaining("gemini-2.5-flash")
     assert rem3 > 59.0
+
 
 def test_safe_account_dir_path_traversal_rejection(tmp_path):
     """Verify _safe_account_dir rejects path traversal and malicious account IDs."""

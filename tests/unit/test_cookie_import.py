@@ -1,7 +1,12 @@
+import json
+
 import pytest
 
 from aistudio_api.infrastructure.account.cookie_parser import (
+    ROLLING_COOKIE_NAMES,
+    apply_set_cookie_lines,
     build_google_cookie_list,
+    merge_storage_states,
     parse_cookie_string,
 )
 from aistudio_api.infrastructure.account.cookie_refresher import (
@@ -142,12 +147,14 @@ def test_parse_cookie_string_discards_transient_and_telemetry_cookies():
     assert "SAPISID" in names
     assert "__Secure-1PSID" in names
 
-    # Stale/transient/tracking cookies must be discarded
+    # 遥测与站点级会话 ID 必须丢弃：交给当前环境重新协商
     assert "_ga" not in names
     assert "NID" not in names
-    assert "SIDCC" not in names
     assert "OSID" not in names
     assert "__Secure-OSID" not in names
+    # SIDCC 属于 Google 全域会话链路（与 PSIDTS/PSIDCC 同族），必须保留：
+    # 丢掉它等于放弃已有的轮换起点，只能靠重新协商，而重新协商会让旧代次作废
+    assert "SIDCC" in names
 
 
 def test_domain_overrides_scopes_osid_strictly_to_aistudio():
@@ -483,3 +490,175 @@ async def test_probe_import_activates_first_account_and_registers_in_rotator(
     account_service.activate_account.assert_awaited_once_with(
         "acc_new", browser_session
     )
+
+
+def _storage(*pairs: tuple[str, str, str]) -> dict[str, object]:
+    return {
+        "cookies": [
+            {"name": n, "value": v, "domain": d, "path": "/", "expires": -1}
+            for n, v, d in pairs
+        ],
+        "origins": [],
+    }
+
+
+def test_merge_storage_states_keeps_base_rolling_generation():
+    """推送合并不得把服务端的滚动代次回滚到浏览器的旧代次。"""
+    base = _storage(
+        ("SID", "server-sid", ".google.com"),
+        ("__Secure-1PSIDTS", "server-gen-9", ".google.com"),
+        ("SIDCC", "server-sidcc", ".google.com"),
+    )
+    overlay = _storage(
+        ("SID", "browser-sid", ".google.com"),
+        ("__Secure-1PSIDTS", "browser-gen-7", ".google.com"),  # 落后两代
+        ("SIDCC", "browser-sidcc", ".google.com"),
+    )
+    merged = merge_storage_states(base, overlay, keep_base_names=ROLLING_COOKIE_NAMES)
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["SID"] == "browser-sid"  # 长寿命凭据照常覆盖
+    assert by_name["__Secure-1PSIDTS"] == "server-gen-9"  # 代次保持服务端
+    assert by_name["SIDCC"] == "server-sidcc"
+
+
+def test_merge_storage_states_keeps_base_rolling_across_domain_writings():
+    """推送方与落盘的 domain 写法不同（.google.com vs google.com）也必须识别为同名。"""
+    base = _storage(("__Secure-1PSIDCC", "server-cc", ".google.com"))
+    overlay = _storage(("__Secure-1PSIDCC", "browser-cc", "google.com"))
+    merged = merge_storage_states(base, overlay, keep_base_names=ROLLING_COOKIE_NAMES)
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["__Secure-1PSIDCC"] == "server-cc"
+
+
+def test_merge_storage_states_accepts_rolling_when_base_lacks_it():
+    """服务端没有该滚动键（新建账号）时，推送值照常进入。"""
+    merged = merge_storage_states(
+        _storage(("SID", "server-sid", ".google.com")),
+        _storage(("__Secure-1PSIDTS", "browser-gen", ".google.com")),
+        keep_base_names=ROLLING_COOKIE_NAMES,
+    )
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "browser-gen"
+
+
+def test_apply_set_cookie_lines_rotates_generation_forward():
+    """探活响应的 Set-Cookie：新代次落盘、清除指令被忽略、遥测噪声不进来。"""
+    state = _storage(("__Secure-1PSIDTS", "old-gen", ".google.com"))
+    merged, changed = apply_set_cookie_lines(
+        state,
+        [
+            (
+                "__Secure-1PSIDTS=sidts-new-gen; Path=/; Secure; HttpOnly; "
+                "Domain=.google.com; Expires=Thu, 01 Jan 2027 00:00:00 GMT; SameSite=None"
+            ),
+            "SIDCC=; Path=/; Domain=.google.com; Max-Age=0",  # 清除指令
+            "_ga=GA1.2.x; Path=/; Domain=.google.com; Expires=Thu, 01 Jan 2027 00:00:00 GMT",
+            (
+                "NID=999=nid; Path=/; Domain=.google.com; "
+                "Expires=Wed, 01 Jan 2020 00:00:00 GMT"
+            ),  # 2000 年前视为清除
+        ],
+    )
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "sidts-new-gen"
+    assert "SIDCC" not in by_name
+    assert "_ga" not in by_name
+    assert "NID" not in by_name
+    assert changed == ["__Secure-1PSIDTS"]
+
+
+def test_apply_set_cookie_lines_skips_unchanged_values(tmp_path):
+    """值没变的 Set-Cookie 不产生变更（避免无意义的磁盘写与指纹抖动）。"""
+    state = _storage(("SIDCC", "same-val", ".google.com"))
+    merged, changed = apply_set_cookie_lines(
+        state, ["SIDCC=same-val; Path=/; Domain=.google.com"]
+    )
+    assert changed == []
+    assert {c["value"] for c in merged["cookies"]} == {"same-val"}
+
+
+def test_apply_set_cookie_lines_survives_garbage(tmp_path):
+    """畸形 Set-Cookie 头不抛异常、不污染原 state。"""
+    state = _storage(("SID", "v", ".google.com"))
+    merged, changed = apply_set_cookie_lines(
+        state, ["", ";;", "no-equals-sign", "=empty-name", "X=deleted"]
+    )
+    assert changed == []
+    assert {c["name"] for c in merged["cookies"]} == {"SID"}
+
+
+def test_apply_set_cookie_lines_persists_to_auth_json_roundtrip(tmp_path):
+    """完整链路：Set-Cookie 应用到 auth.json 后，再被推送读入时不会被覆盖回旧代。"""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            _storage(
+                ("SID", "s", ".google.com"),
+                ("__Secure-1PSIDTS", "gen-1", ".google.com"),
+            )
+        )
+    )
+    from aistudio_api.application.account_health import _persist_rotated_cookies
+
+    changed = _persist_rotated_cookies(
+        auth_file,
+        ["__Secure-1PSIDTS=sidts-gen-2; Path=/; Domain=.google.com; Secure; HttpOnly"],
+    )
+    assert changed == ["__Secure-1PSIDTS"]
+
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    overlay = _storage(("__Secure-1PSIDTS", "gen-1", ".google.com"))
+    merged = merge_storage_states(state, overlay, keep_base_names=ROLLING_COOKIE_NAMES)
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "sidts-gen-2"
+
+
+def test_merge_storage_states_strips_server_rotated_flag():
+    """推送接受新代次后，server_rotated 标记必须被清掉（保护资格重置）。"""
+    base = {
+        "cookies": [
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "gen-1",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": -1,
+            }
+        ],
+        "origins": [],
+        "server_rotated": True,
+    }
+    overlay = _storage(("__Secure-1PSIDTS", "gen-2", ".google.com"))
+    merged = merge_storage_states(base, overlay)
+    assert "server_rotated" not in merged
+
+
+def test_note_pending_rotation_merges_into_saved_jar():
+    """在途响应捕获的 Set-Cookie 落盘前与浏览器罐合并：新代次不能被旧 jar 吃掉。"""
+    from aistudio_api.infrastructure.gateway.session import BrowserSession
+
+    session = BrowserSession.__new__(BrowserSession)
+    session._pending_rotations = []
+    session.note_pending_rotation(
+        ["__Secure-1PSIDTS=sidts-gen-5; Path=/; Domain=.google.com; Secure; HttpOnly"]
+    )
+    assert len(session._pending_rotations) == 1
+
+    # 模拟 _save_cookies 内部合并步骤
+    from aistudio_api.infrastructure.account.cookie_parser import apply_set_cookie_lines
+
+    browser_jar = {
+        "cookies": [
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "sidts-gen-4",  # 浏览器 jar 还停在上一代
+                "domain": ".google.com",
+                "path": "/",
+                "expires": -1,
+            }
+        ],
+        "origins": [],
+    }
+    merged, _ = apply_set_cookie_lines(browser_jar, session._pending_rotations)
+    by_name = {c["name"]: c["value"] for c in merged["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "sidts-gen-5"

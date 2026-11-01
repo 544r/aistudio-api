@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterable
+from email.utils import parsedate_to_datetime
 
 from aistudio_api.infrastructure.utils.logger import get_logger
 
@@ -87,9 +88,27 @@ _DOMAIN_OVERRIDES: dict[str, list[str]] = {
     "__Secure-3PSIDTS": [".google.com", "aistudio.google.com", "accounts.google.com"],
 }
 
-# 外部导入时可安全丢弃的遥测、易失效挑战及旧环境绑定的临时 Cookie。
-# 过滤这些 Cookie 既能让网页在当前 IP/环境重新自然协商下发全新凭据，
-# 又能精简内存与 Cookie 存储体积（尤其对 Android 低内存环境极为友好）：
+# Google 的“滚动代次”凭据：任意一次响应都可能用 Set-Cookie 把它们推进到新一代，
+# 旧代次一旦被服务端记录为已替换，再提交就得到 401（表现为“Cookie 突然过期”）。
+# 因此这些键只允许向前更新——来自本服务浏览器实测或探活响应的 Set-Cookie——
+# 不允许被磁盘快照或另一台浏览器的推送顶回上一代。
+ROLLING_COOKIE_NAMES: frozenset[str] = frozenset(
+    {
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS",
+        "__Secure-1PSIDRTS",
+        "__Secure-3PSIDRTS",
+        "SIDCC",
+        "__Secure-1PSIDCC",
+        "__Secure-3PSIDCC",
+    }
+)
+
+# 外部导入时可安全丢弃的遥测及旧环境绑定的临时 Cookie。
+# 过滤这些 Cookie 既能让网页在当前 IP/环境重新自然下发全新凭据，
+# 又能精简内存与 Cookie 存储体积（尤其对 Android 低内存环境极为友好）。
+# 注意：SIDCC / *PSIDCC / OSID 属于会话链路，不再丢弃——丢掉了就只能靠浏览器
+# 重新协商，而重新协商出来的新代次会让磁盘上那份旧代次立刻作废。
 DISCARDABLE_IMPORT_COOKIE_NAMES: frozenset[str] = frozenset(
     {
         "_ga",
@@ -100,9 +119,6 @@ DISCARDABLE_IMPORT_COOKIE_NAMES: frozenset[str] = frozenset(
         "DV",
         "AEC",
         "NID",
-        "SIDCC",
-        "__Secure-1PSIDCC",
-        "__Secure-3PSIDCC",
         "OSID",
         "__Secure-OSID",
     }
@@ -414,13 +430,14 @@ def build_storage_state_from_browser_cookies(
 def missing_session_cookies(names: Iterable[str]) -> list[str]:
     """返回缺失的会话必需 Cookie 类别；空列表表示可以尝试使用。
 
-    只硬性要求 SID 与签名票：没有 SAPISID 系 Cookie 就无法生成
-    SAPISIDHASH；`__Secure-*PSID` 缺失在部分环境是正常的（Chrome 分区
-    Cookie 不向扩展 API 暴露），由服务端 ListModels 探活做最终判定。
+    签名票是硬性要求：没有 SAPISID 系 Cookie 就无法生成 SAPISIDHASH。
+    长寿命会话凭据则接受 `SID` 或 `__Secure-*PSID` 任一——指纹浏览器和
+    GM_cookie 这类抓取路径经常读不到 `SID`，但 `__Secure-1PSID` 完全等价，
+    不能据此拒绝一份本来可用的凭据（由服务端 ListModels 探活做最终判定）。
     """
     name_set = set(names)
     missing: list[str] = []
-    if "SID" not in name_set:
+    if "SID" not in name_set and not name_set & set(SESSION_SESSION_COOKIE_NAMES):
         missing.append("SID")
     if not any(name in name_set for name in SESSION_SIGNING_COOKIE_NAMES):
         missing.append("SAPISID")
@@ -430,13 +447,22 @@ def missing_session_cookies(names: Iterable[str]) -> list[str]:
 def merge_storage_states(
     base: dict[str, object] | None,
     overlay: dict[str, object],
+    *,
+    keep_base_names: Iterable[str] = (),
 ) -> dict[str, object]:
     """按 (name, domain, path) 合并两份 storage state，overlay 覆盖 base。
 
     用途：浏览器扩展可能读不到分区 Cookie（如 __Secure-1PSID），推送时
     与账号现有 auth.json 合并，避免把浏览器里看不见但依然有效的旧 Cookie
     丢掉；overlay 中的同名 Cookie 总是以新推送的值为准。
+
+    `keep_base_names` 里的**键名**是例外：只要 base 里已经存在这个名字的 Cookie，
+    就保留 base 的值，不按 (domain, path) 细分——推送方浏览器里的域名写法常常和
+    服务端落盘的不一致，按三元组判断会漏保护。传入 `ROLLING_COOKIE_NAMES`
+    即可防止外部推送把服务端的滚动代次回滚到上一代（旧代次被 Google 判定为
+    重放 → 401 → 账号被判“登录态失效”）。
     """
+    keep = {str(name) for name in keep_base_names}
     merged: dict[tuple[str, str, str], dict[str, object]] = {}
     origins: list[object] = []
 
@@ -455,12 +481,16 @@ def merge_storage_states(
         if isinstance(base_origins, list):
             origins = list(base_origins)
 
+    base_names = {key[0] for key in merged}
     overlay_cookies = overlay.get("cookies")
     if isinstance(overlay_cookies, list):
         for cookie in overlay_cookies:
             if isinstance(cookie, dict) and cookie.get("name"):
+                name = str(cookie.get("name"))
+                if name in keep and name in base_names:
+                    continue
                 key = (
-                    str(cookie.get("name")),
+                    name,
                     str(cookie.get("domain") or "").lower(),
                     str(cookie.get("path") or "/"),
                 )
@@ -471,6 +501,119 @@ def merge_storage_states(
         origins = list(overlay_origins)
 
     return {"cookies": list(merged.values()), "origins": origins}
+
+
+# 2000-01-01：早于此的 Expires 一律是“清除 Cookie”写法
+_EPOCH_SANITY_SECONDS = 946_684_800
+
+_SET_COOKIE_ATTR_PATTERNS = (
+    (re.compile(r"^expires=(.+)$", re.IGNORECASE), "expires"),
+    (re.compile(r"^max-age=(-?\d+)$", re.IGNORECASE), "max_age"),
+    (re.compile(r"^domain=(.+)$", re.IGNORECASE), "domain"),
+    (re.compile(r"^path=(.+)$", re.IGNORECASE), "path"),
+    (re.compile(r"^samesite=(\w+)$", re.IGNORECASE), "sameSite"),
+)
+
+
+def apply_set_cookie_lines(
+    state: dict[str, object] | None,
+    set_cookie_lines: Iterable[str],
+) -> tuple[dict[str, object], list[str]]:
+    """把响应头里的 `Set-Cookie` 叠加到 storage state 上（只向前，不删除）。
+
+    这是无人值守续命的关键：探活/请求响应里 Google 下发的新一代 PSIDTS /
+    SIDCC 必须立刻落盘，否则下一次提交的就是旧代次。返回 (新 state, 变更的
+    Cookie 名列表)。
+
+    与上游惯例一致地跳过三类噪声：值为空或 `deleted` 的清除指令、gstatic 域、
+    以及 Expires 落在 197x-199x 的“立即过期”写法（那是清 Cookie 用的）。
+    """
+    base = merge_storage_states(state, {"cookies": [], "origins": []})
+    index: dict[tuple[str, str, str], dict[str, object]] = {
+        (
+            str(cookie.get("name")),
+            str(cookie.get("domain") or "").lower(),
+            str(cookie.get("path") or "/"),
+        ): cookie
+        for cookie in base["cookies"]  # type: ignore[union-attr]
+        if isinstance(cookie, dict) and cookie.get("name")
+    }
+    by_name: dict[str, tuple[str, str, str]] = {
+        str(cookie["name"]): key for key, cookie in index.items()
+    }
+    changed: list[str] = []
+
+    for raw in set_cookie_lines:
+        if not raw or not isinstance(raw, str):
+            continue
+        parts = [p.strip() for p in raw.split(";") if p.strip()]
+        if not parts or "=" not in parts[0]:
+            continue
+        name, _, value = parts[0].partition("=")
+        name = name.strip()
+        value = value.strip().strip('"')
+        if not name or not value or value == "deleted":
+            continue
+        # 遥测 Cookie 不进账号库——它不承载会话，还会白白放大 auth.json
+        if name in DISCARDABLE_IMPORT_COOKIE_NAMES or name.startswith(("_ga", "_gcl")):
+            continue
+
+        attrs: dict[str, str] = {}
+        for token in parts[1:]:
+            for pattern, label in _SET_COOKIE_ATTR_PATTERNS:
+                matched = pattern.match(token)
+                if matched:
+                    attrs[label] = matched.group(1)
+                    break
+        if "Secure" in parts[1:]:
+            attrs.setdefault("secure", "1")
+        if "HttpOnly" in parts[1:]:
+            attrs.setdefault("httpOnly", "1")
+
+        domain = attrs.get("domain", ".google.com").strip().lstrip(".")
+        if "gstatic" in domain.lower():
+            continue
+        path = attrs.get("path", "/").strip() or "/"
+
+        expires_val: float = -1.0
+        if "max_age" in attrs:
+            max_age = float(attrs["max_age"])
+            if max_age < 0:
+                continue
+            expires_val = time.time() + max_age
+        elif "expires" in attrs:
+            with contextlib.suppress(ValueError, TypeError):
+                parsed = parsedate_to_datetime(attrs["expires"])
+                if parsed is not None:
+                    expires_val = parsed.timestamp()
+                    # 2000 年以前视为“清除 Cookie”写法，不是新的会话值
+                    if expires_val < _EPOCH_SANITY_SECONDS:
+                        continue
+
+        key = (name, domain.lower(), path)
+        existing_key = by_name.get(name)
+        if existing_key is not None and existing_key != key:
+            # 同名不同域视为同一会话值：以已有的那条为准，避免注入重复代次
+            key = existing_key
+        current = index.get(key)
+        if current is not None and current.get("value") == value:
+            continue
+        entry: dict[str, object] = {
+            "name": name,
+            "value": value,
+            "domain": domain if domain else ".google.com",
+            "path": path,
+            "expires": expires_val,
+            "secure": True,
+            "httpOnly": "1" in attrs,
+        }
+        same_site = _normalize_same_site(attrs.get("sameSite"))
+        entry["sameSite"] = same_site or ("None" if entry["httpOnly"] else "Lax")
+        index[key] = entry
+        by_name[name] = key
+        changed.append(name)
+
+    return {"cookies": list(index.values()), "origins": base["origins"]}, changed
 
 
 def parse_emails_from_ogs_html(

@@ -162,7 +162,12 @@ async def test_check_all_accounts_updates_rotator(tmp_path, monkeypatch):
         )
     )
 
-    async def fake_probe(cookies: dict[str, str], auth_user: str = "0"):
+    probed_with: list[object] = []
+
+    async def fake_probe(
+        cookies: dict[str, str], auth_user: str = "0", *, persist_to: object = None
+    ):
+        probed_with.append(persist_to)
         value = next(iter(cookies.values()))
         return {"valid": True, "expired": False, "unknown": None}[value]
 
@@ -177,6 +182,9 @@ async def test_check_all_accounts_updates_rotator(tmp_path, monkeypatch):
         "expired": ["acc_expired"],
         "unknown": ["acc_unknown"],
     }
+    # 探活要带上 auth.json 路径：响应里的 Set-Cookie 向前落盘，闲置账号的滚动链
+    # 才会继续推进，不需要人挂着浏览器反复推送
+    assert probed_with and all(path is not None for path in probed_with)
     assert ("acc_valid", False) in calls
     assert ("acc_expired", True) in calls
     assert all(account_id != "acc_disabled" for account_id, _ in calls)

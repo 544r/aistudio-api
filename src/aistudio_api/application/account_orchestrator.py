@@ -11,9 +11,14 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 logger = get_logger("orchestrator")
 MAX_RETRIES = 5
 
+# 401 原地自愈的最小间隔：同一账号在窗口内只允许被“重导航救一次”，
+# 救不回来才判登录态失效，避免持续 401 时反复重导航把整条请求链路拖死。
+SELFHEAL_COOLDOWN_S = 180.0
+
 _switch_lock: asyncio.Lock | None = None
 _switch_lock_loop: asyncio.AbstractEventLoop | None = None
 _last_switch_time: float = 0.0
+_selfheal_at: dict[str, float] = {}
 
 
 def _get_switch_lock() -> asyncio.Lock:
@@ -26,6 +31,56 @@ def _get_switch_lock() -> asyncio.Lock:
         _switch_lock = asyncio.Lock()
         _switch_lock_loop = loop
     return _switch_lock
+
+
+async def _try_in_place_session_repair(
+    account_id: str,
+    model: str | None = None,
+) -> bool:
+    """让服务端浏览器原地重跑一次会话，尝试自己把登录态救回来。
+
+    Google 的 `*PSIDTS` / `*PSIDCC` 是滚动代次凭据：只要有一次轮换没落盘（另一台
+    浏览器也在用这个号、进程重启后读了旧快照），下一次提交的就是上一代，上游直接
+    401。这种 401 并不是“密码失效”——重新导航会让 Chromium 吃回 Google 下发的
+    新一代 Cookie，请求就能继续。
+
+    只对当前活跃账号有效（切到别的号不算自愈），且受 SELFHEAL_COOLDOWN_S 限流；
+    与切号不互斥：切号保请求，这里只在“无处可切”时同步执行，其余情况由巡检
+    （每 10 分钟全量探活）兜底仲裁。
+    """
+    global _last_switch_time
+
+    now = time.time()
+    if now - _selfheal_at.get(account_id, 0.0) < SELFHEAL_COOLDOWN_S:
+        return False
+    _selfheal_at[account_id] = now
+
+    account_service = runtime_state.account_service
+    client = runtime_state.client
+    rotator = runtime_state.rotator
+    if account_service is None or client is None or client.session is None:
+        return False
+    active = account_service.get_active_account()
+    if active is None or active.id != account_id:
+        return False
+
+    logger.info(
+        "账号 %s 返回 401，先原地刷新会话重试一次（暂不判定登录态失效）", account_id
+    )
+    client.clear_templates()
+    try:
+        result = await account_service.activate_account(account_id, client.session)
+    except Exception as exc:
+        logger.warning("账号 %s 原地刷新会话失败: %s", account_id, exc)
+        return False
+    if result is None:
+        return False
+
+    if rotator is not None:
+        rotator.clear_cooldown(account_id, model=model)
+    _last_switch_time = time.time()
+    logger.info("账号 %s 会话已原地刷新，重试当前请求", account_id)
+    return True
 
 
 async def try_switch_account(
@@ -85,7 +140,10 @@ async def try_switch_account(
             _last_switch_time >= entry_time
             and current_id
             and (not is_session_expired or current_id != failed_account_id)
-            and (not required_tiers or (current_active and current_active.tier in required_tiers))
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
@@ -95,10 +153,11 @@ async def try_switch_account(
             )
             return True
 
-        # 遇到登录态失效时，永久禁用该账号并拒绝原地重试
-        if failed_account_id and is_session_expired:
-            rotator.record_session_expired(failed_account_id, model=model)
-        elif failed_account_id and is_auth_error:
+        # 真正的 401 未必是“密码失效”：`*PSIDTS` 是滚动代次凭据，只要有一次轮换
+        # 没落盘（另一台浏览器也在用这个号、进程重启读了旧快照），下一次提交的就是
+        # 上一代，上游直接 401。这种能靠重新导航救回来，但重新导航要几秒，所以只在
+        # “没有备用账号可切”时才尝试；有号可切就先切号，把失效的那个留在原地。
+        if failed_account_id and is_auth_error and not is_session_expired:
             rotator.record_auth_error(failed_account_id, model=model)
 
         # 双重检查 2：如果已经由并发协程切换到了新账号，且新账号对当前 model 可用，则直接复用
@@ -106,7 +165,10 @@ async def try_switch_account(
             failed_account_id
             and current_id
             and current_id != failed_account_id
-            and (not required_tiers or (current_active and current_active.tier in required_tiers))
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
             and rotator.is_account_available(current_id, model=model)
         ):
             logger.info(
@@ -123,8 +185,24 @@ async def try_switch_account(
             required_tiers=required_tiers,
             is_session_expired=is_session_expired,
         )
+
+        if failed_account_id and is_session_expired and next_account is not None:
+            # 有备用账号：先切号保请求。但 401 不一定真失效（滚动代次落后一代
+            # 也会 401，而账号基本是同一批导入、经常一起到龄），所以这里只记
+            # 一个短冷却，交给后台探活仲裁：探活还活着就自动复活，真死了才会
+            # 被 `set_session_expired(True)` 拉黑 24 小时。
+            rotator.record_auth_error(failed_account_id, model=model)
+            logger.info(
+                "账号 %s 返回 401，先切换到备用账号，登录态交给巡检探活仲裁",
+                failed_account_id,
+            )
+
         if next_account is None:
-            if is_session_expired:
+            # 无处可切：给这个账号一次原地自愈的机会，救回来就重试当前请求
+            if is_session_expired and failed_account_id:
+                if await _try_in_place_session_repair(failed_account_id, model=model):
+                    return True
+                rotator.record_session_expired(failed_account_id, model=model)
                 logger.error(
                     "账号 %s 登录态失效且无其他可用备用账号，禁止原地重试",
                     failed_account_id,
@@ -164,7 +242,10 @@ async def try_switch_account(
             return result is not None
         return bool(
             current_id
-            and (not required_tiers or (current_active and current_active.tier in required_tiers))
+            and (
+                not required_tiers
+                or (current_active and current_active.tier in required_tiers)
+            )
             and rotator.is_account_available(current_id, model=model)
         )
 
@@ -186,7 +267,15 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
         if model_discovery.is_paid_model(model):
             req_tier = model_discovery.get_required_tier(model)
             req_tiers = model_discovery.get_required_tiers(model)
-            allowed_tiers = set(req_tiers) if req_tiers else ({"Pro", "Ultra", "Ultra_20X"} if req_tier == "Pro" else {"Ultra", "Ultra_20X"})
+            allowed_tiers = (
+                set(req_tiers)
+                if req_tiers
+                else (
+                    {"Pro", "Ultra", "Ultra_20X"}
+                    if req_tier == "Pro"
+                    else {"Ultra", "Ultra_20X"}
+                )
+            )
             cur_tier = (current.tier if current else None) or "Free"
             if not current or cur_tier not in allowed_tiers:
                 logger.info(
@@ -223,6 +312,7 @@ async def ensure_active_account(attempt: int, model: str | None = None) -> None:
     ):
         await try_switch_account(model=model, failed_account_id=current.id)
 
+
 def record_rotator_event(
     event: str,
     model: str | None = None,
@@ -242,6 +332,7 @@ def record_rotator_event(
         rotator.record_auth_error(account.id, model=model)
     elif event == "error":
         rotator.record_error(account.id, model=model)
+
 
 __all__ = [
     "MAX_RETRIES",

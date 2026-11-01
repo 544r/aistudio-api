@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from aistudio_api.api.state import runtime_state
@@ -14,9 +16,11 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_EXT_BIN,
     DEFAULT_ORIGIN,
     DEFAULT_USER_AGENT,
+    apply_set_cookie_lines,
     calculate_sapisid_hash,
     parse_raw_cookies,
 )
+from aistudio_api.infrastructure.utils.common import atomic_write_json
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -39,13 +43,51 @@ _LIST_MODELS_URL = (
 )
 
 
+def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[str]:
+    """把上游 `Set-Cookie` 向前合并进账号的 auth.json。
+
+    只写入、不改判：任何异常都吞掉，探活结论与它无关。
+    """
+    if not lines:
+        return []
+    target = Path(auth_path)
+    if not target.is_file():
+        return []
+    try:
+        state = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return []
+        merged, changed = apply_set_cookie_lines(state, lines)
+        if not changed:
+            return []
+        # 标记“这份 auth.json 的滚动代次由服务端推进过”：推送合并时据此保护
+        # 这份代次不被另一台浏览器的旧代次顶回（见 routes_accounts）。
+        merged["server_rotated"] = True
+        atomic_write_json(target, merged)
+    except Exception as exc:
+        logger.debug("回写探活轮换 Cookie 失败 (%s): %s", target, exc)
+        return []
+    logger.info(
+        "探活响应已推进 %s 的会话 Cookie: %s",
+        target.name,
+        ", ".join(sorted(set(changed))),
+    )
+    return changed
+
+
 async def probe_account_session(
     cookies: dict[str, str],
     auth_user: str = "0",
     *,
     timeout: float = 8.0,
+    persist_to: str | Path | None = None,
 ) -> bool | None:
     """用账号 Cookie 请求 ListModels，判断登录态是否仍有效。
+
+    传入 `persist_to`（账号 auth.json 路径）时，会把响应头里 Google 下发的
+    `Set-Cookie` 合并回该文件。这一步是无人值守续命的关键：ListModels 探活本来
+    就每 10 分钟对全部启用账号跑一次，顺手把响应里的新一代 PSIDTS / SIDCC 落盘，
+    闲置账号的滚动链也在往前走，就不需要靠人挂着浏览器反复推送了。
 
     Returns:
         True 有效；False 上游明确返回 401；None 网络异常或未知状态。
@@ -80,6 +122,9 @@ async def probe_account_session(
     except Exception as exc:
         logger.debug("账号探活请求失败: %s", exc)
         return None
+
+    if persist_to is not None:
+        _persist_rotated_cookies(persist_to, response.headers.get_list("set-cookie"))
 
     if response.status_code in (200, 400, 403):
         # 400/403 说明请求已经通过 Google 鉴权，只是参数或权限受限
@@ -131,7 +176,7 @@ async def check_all_accounts(
             except Exception as exc:
                 logger.debug("读取账号 %s 的 Cookie 失败: %s", account_id, exc)
                 return None
-            return await probe_account_session(cookies, auth_user)
+            return await probe_account_session(cookies, auth_user, persist_to=path)
 
     results = await asyncio.gather(
         *(_probe(account.id, account.auth_user) for account in accounts)
