@@ -33,6 +33,39 @@ def _get_switch_lock() -> asyncio.Lock:
     return _switch_lock
 
 
+async def _try_rotate_cookies_repair(account_id: str) -> bool:
+    """401 时的纯 HTTP 抢救：RotateCookies 换新一代代次（pg-bridge 同款）。
+
+    比浏览器重导航快一个量级（几百毫秒 vs 几秒），不占用服务器浏览器；前提是
+    auth.json 里有 LSID / __Host-*PLSID 根凭据（油猴 v1.3.2 起随罐推送）。
+    躺平策略下这是唯一的主动轮换触发点：平时不碰账号，只在 401 时抢救。
+    成功轮换后清掉该账号的滚动代次冷却，让重试立即用上新鲜代次。
+    """
+    account_service = runtime_state.account_service
+    if account_service is None:
+        return False
+    auth_path = account_service.get_account_auth_path(account_id)
+    if not auth_path:
+        return False
+
+    from aistudio_api.application.account_health import (
+        _rotate_rescue_cooldown_ok,
+        rotate_account_cookies,
+    )
+
+    if not _rotate_rescue_cooldown_ok(account_id):
+        return False
+    try:
+        changed = await rotate_account_cookies(auth_path)
+    except Exception as exc:
+        logger.debug("账号 %s RotateCookies 抢救失败: %s", account_id, exc)
+        return False
+    if not changed:
+        return False
+    logger.info("账号 %s 已通过 RotateCookies 换新一代代次", account_id)
+    return True
+
+
 async def _try_in_place_session_repair(
     account_id: str,
     model: str | None = None,
@@ -187,10 +220,19 @@ async def try_switch_account(
         )
 
         if failed_account_id and is_session_expired and next_account is not None:
-            # 有备用账号：先切号保请求。但 401 不一定真失效（滚动代次落后一代
-            # 也会 401，而账号基本是同一批导入、经常一起到龄），所以这里只记
-            # 一个短冷却，交给后台探活仲裁：探活还活着就自动复活，真死了才会
-            # 被 `set_session_expired(True)` 拉黑 24 小时。
+            # 有备用账号：先切号保请求。切号是同步开销最大的动作，切换前先花几百
+            # 毫秒试一次纯 HTTP 抢救（RotateCookies 换新代次）——救回来连号都不用
+            # 切，当前请求直接重试。
+            if await _try_rotate_cookies_repair(
+                failed_account_id
+            ) and rotator.is_account_available(failed_account_id, model=model):
+                logger.info(
+                    "账号 %s 已通过 RotateCookies 复活，无需切换账号", failed_account_id
+                )
+                return True
+            # 401 不一定真失效（滚动代次落后一代也会 401，且账号基本是同一批导入、
+            # 经常一起到龄），所以这里只记一个短冷却，交给后台探活仲裁：探活还活着
+            # 就自动复活，真死了才会被 `set_session_expired(True)` 拉黑 24 小时。
             rotator.record_auth_error(failed_account_id, model=model)
             logger.info(
                 "账号 %s 返回 401，先切换到备用账号，登录态交给巡检探活仲裁",
@@ -198,9 +240,11 @@ async def try_switch_account(
             )
 
         if next_account is None:
-            # 无处可切：给这个账号一次原地自愈的机会，救回来就重试当前请求
+            # 无处可切：抢救链 = 纯 HTTP RotateCookies（快）→ 浏览器重导航自愈（慢）
             if is_session_expired and failed_account_id:
-                if await _try_in_place_session_repair(failed_account_id, model=model):
+                if await _try_rotate_cookies_repair(failed_account_id) or (
+                    await _try_in_place_session_repair(failed_account_id, model=model)
+                ):
                     return True
                 rotator.record_session_expired(failed_account_id, model=model)
                 logger.error(

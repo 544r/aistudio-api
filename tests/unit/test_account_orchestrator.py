@@ -513,3 +513,66 @@ async def test_newly_imported_account_manual_activation_stays_sticky_on_first_re
         runtime_state.rotator = orig_rotator
         runtime_state.account_service = orig_service
         runtime_state.client = orig_client
+
+
+@pytest.mark.asyncio
+async def test_401_rescue_prefers_rotate_cookies_over_browser_repair(monkeypatch):
+    """401 抢救链：纯 HTTP RotateCookies 成功时不再走浏览器重导航（省几秒）。"""
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.application import account_orchestrator as orchestrator
+
+    mock_rotator = MagicMock(spec=AccountRotator)
+    mock_service = MagicMock(spec=AccountService)
+    mock_client = MagicMock(spec=AIStudioClient)
+    mock_client.session = MagicMock()
+
+    active_acc = AccountMeta(
+        id="acc_1", name="A", email="single@gmail.com", created_at="2026-01-01"
+    )
+    mock_service.get_active_account = MagicMock(return_value=active_acc)
+    mock_service.activate_account = AsyncMock(return_value=active_acc)
+    # 无备用账号：触发抢救链
+    mock_rotator.get_next_account = AsyncMock(return_value=None)
+    mock_rotator.is_account_available = MagicMock(return_value=True)
+
+    rotate_calls: list[str] = []
+    repair_calls: list[str] = []
+
+    async def fake_rotate(auth_path):
+        rotate_calls.append(str(auth_path))
+        return ["__Secure-1PSIDTS"]
+
+    async def fake_repair(account_id, model=None):
+        repair_calls.append(account_id)
+        return True
+
+    monkeypatch.setattr(orchestrator, "_try_rotate_cookies_repair", fake_rotate)
+    monkeypatch.setattr(orchestrator, "_try_in_place_session_repair", fake_repair)
+
+    orig_rotator = runtime_state.rotator
+    orig_service = runtime_state.account_service
+    orig_client = runtime_state.client
+    orig_selfheal = orchestrator._selfheal_at
+    orchestrator._selfheal_at = {}
+    try:
+        runtime_state.rotator = mock_rotator
+        runtime_state.account_service = mock_service
+        runtime_state.client = mock_client
+
+        result = await try_switch_account(
+            model="gemini-3.8-flash",
+            failed_account_id="acc_1",
+            is_auth_error=True,
+            is_session_expired=True,
+        )
+        assert result is True
+        assert len(rotate_calls) == 1
+        # RotateCookies 成功 → 浏览器重导航一次都不该发生
+        assert repair_calls == []
+        mock_rotator.record_session_expired.assert_not_called()
+    finally:
+        runtime_state.rotator = orig_rotator
+        runtime_state.account_service = orig_service
+        runtime_state.client = orig_client
+        orchestrator._selfheal_at = orig_selfheal

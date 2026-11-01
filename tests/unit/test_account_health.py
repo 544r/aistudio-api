@@ -331,12 +331,10 @@ async def test_rotate_account_cookies_failure_is_silent(tmp_path, monkeypatch):
     assert auth_file.read_text(encoding="utf-8") == before
 
 
-def test_rotate_cooldown_blocks_repeat_within_interval():
-    """频控：间隔内同账号不允许再次主动轮换，force 可越过（401 抢救用）。"""
-    health._rotate_cookies_at.clear()
-    assert health._rotate_cooldown_ok("acc_a") is True
-    health._note_rotate_done("acc_a")
-    assert health._rotate_cooldown_ok("acc_a") is False
-    assert health._rotate_cooldown_ok("acc_b") is True
-    assert health._rotate_cooldown_ok("acc_a", force=True) is True
-    health._rotate_cookies_at.clear()
+def test_rotate_rescue_cooldown_blocks_repeat_within_interval():
+    """抢救频控：间隔内同账号不再重复发 RotateCookies（防 Google 风控）。"""
+    health._rotate_rescue_at.clear()
+    assert health._rotate_rescue_cooldown_ok("acc_a") is True
+    assert health._rotate_rescue_cooldown_ok("acc_a") is False
+    assert health._rotate_rescue_cooldown_ok("acc_b") is True
+    health._rotate_rescue_at.clear()
