@@ -525,7 +525,11 @@ async def navigate_to_aistudio(
                     "访问 AI Studio 后检测到重定向至登录页: %s，尝试重新注入 Cookie...",
                     current_url,
                 )
-                if not await load_cookies_to_page(page, auth_file):
+                # 登录页重注入不清空浏览器罐：罐里的滚动代次可能比 auth.json 快照
+                # 新，清罐重灌等于把旧代次再交一遍，Google 会直接判会话异常。
+                if not await load_cookies_to_page(
+                    page, auth_file, preserve_rolling=True
+                ):
                     raise SessionExpiredError(
                         f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
                     )
