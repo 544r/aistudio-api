@@ -259,6 +259,32 @@ class CookiePushHistoryResponse(BaseModel):
     capacity: int
 
 
+class RotationChangeResponse(BaseModel):
+    name: str
+    domain: str = ""
+    before: str | None = None
+    after: str | None = None
+
+
+class RotationEventResponse(BaseModel):
+    seq: int
+    at: float
+    account_id: str
+    source: str
+    kind: str
+    reason: str = ""
+    cookie_count: int = 0
+    fingerprint: str = ""
+    previous_fingerprint: str | None = None
+    changes: list[RotationChangeResponse] = []
+
+
+class RotationHistoryResponse(BaseModel):
+    entries: list[RotationEventResponse]
+    total: int
+    capacity: int
+
+
 class ProbeAndImportRequest(BaseModel):
     cookies: str
     name_prefix: str | None = None
@@ -514,6 +540,32 @@ async def push_cookies(
                 }
             if acc.id == target.id:
                 merged_for_target = merged_state
+            with contextlib.suppress(Exception):
+                from aistudio_api.application.cookie_rotation_history import (
+                    diff_cookie_values_as_changes,
+                    get_rotation_history,
+                    snapshot_cookie_values,
+                )
+
+                get_rotation_history().record(
+                    account_id=acc.id,
+                    source="push",
+                    kind="updated",
+                    reason="浏览器推送合并",
+                    cookie_count=len(
+                        merged_state.get("cookies")  # type: ignore[arg-type]
+                    )
+                    if isinstance(merged_state.get("cookies"), list)
+                    else 0,
+                    changes=diff_cookie_values_as_changes(
+                        snapshot_cookie_values(
+                            existing_state.get("cookies")  # type: ignore[arg-type]
+                            if isinstance(existing_state, dict)
+                            else None
+                        ),
+                        snapshot_cookie_values(merged_state.get("cookies")),
+                    ),
+                )
             account_service.save_account_from_cookies(
                 name=acc.name,
                 email=acc.email,
@@ -678,6 +730,52 @@ async def get_cookie_push_history(
         entries=entries,
         total=history.total,
         capacity=history.capacity,
+    )
+
+
+@router.get("/rotation-history", response_model=RotationHistoryResponse)
+async def get_cookie_rotation_history(
+    limit: int = 100,
+) -> RotationHistoryResponse:
+    """返回最近的服务端 Cookie 代次推进流水（不含 Cookie 明文）。
+
+    覆盖四条推进路径：浏览器保存（save）、在途响应捕获（harvest）、探活
+    Set-Cookie 回写（probe）、RotateCookies 抢救（rotate），以及推送合并
+    （push）。续命机制是否真的在转，看这里就够了。
+    """
+    from aistudio_api.application.cookie_rotation_history import (
+        get_rotation_history,
+    )
+
+    history = get_rotation_history()
+    capped = max(1, min(limit, 300))
+    entries = [
+        RotationEventResponse(
+            seq=event.seq,
+            at=event.at,
+            account_id=event.account_id,
+            source=event.source,
+            kind=event.kind,
+            reason=event.reason,
+            cookie_count=event.cookie_count,
+            fingerprint=event.fingerprint,
+            previous_fingerprint=event.previous_fingerprint,
+            changes=[
+                RotationChangeResponse(
+                    name=c.name,
+                    domain=c.domain,
+                    before=c.before,
+                    after=c.after,
+                )
+                for c in event.changes
+            ],
+        )
+        for event in history.recent(limit=capped)
+    ]
+    return RotationHistoryResponse(
+        entries=entries,
+        total=len(entries),
+        capacity=300,
     )
 
 

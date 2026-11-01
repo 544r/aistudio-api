@@ -165,3 +165,31 @@ export interface CookiePushHistoryResponse {
   total: number
   capacity: number
 }
+
+export interface RotationChange {
+  name: string
+  domain: string
+  before: string | null
+  after: string | null
+}
+
+export type RotationSource = 'save' | 'harvest' | 'probe' | 'rotate' | 'push'
+
+export interface RotationEvent {
+  seq: number
+  at: number
+  account_id: string
+  source: RotationSource
+  kind: 'rotated' | 'updated'
+  reason: string
+  cookie_count: number
+  fingerprint: string
+  previous_fingerprint: string | null
+  changes: RotationChange[]
+}
+
+export interface RotationHistoryResponse {
+  entries: RotationEvent[]
+  total: number
+  capacity: number
+}

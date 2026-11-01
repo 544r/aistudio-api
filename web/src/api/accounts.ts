@@ -15,6 +15,7 @@ import type {
   DeleteExpiredAccountsResponse,
   DetectEmailResponse,
   CookiePushHistoryResponse,
+  RotationHistoryResponse,
 } from '@/types'
 
 export const accountsApi = {
@@ -165,5 +166,11 @@ export const accountsApi = {
     return request<{ ok: boolean; cleared: number }>('/api/accounts/push-history', {
       method: 'DELETE',
     })
+  },
+
+  getRotationHistory(limit = 100): Promise<RotationHistoryResponse> {
+    return request<RotationHistoryResponse>(
+      `/api/accounts/rotation-history?limit=${limit}`,
+    )
   },
 }

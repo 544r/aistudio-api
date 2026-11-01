@@ -3,7 +3,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { accountsApi } from '@/api/accounts.ts'
 import { systemApi } from '@/api/system.ts'
 import { useToastStore } from '@/stores/toast.ts'
-import type { CookiePushChange, CookiePushEvent, DumpFileInfo, LogEntry } from '@/types'
+import type {
+  CookiePushChange,
+  CookiePushEvent,
+  DumpFileInfo,
+  LogEntry,
+  RotationEvent,
+  RotationSource,
+} from '@/types'
 import Button from '@/components/ui/Button.vue'
 import Modal from '@/components/ui/Modal.vue'
 import {
@@ -19,7 +26,7 @@ import {
   Trash2,
 } from 'lucide-vue-next'
 
-type TabKey = 'logs' | 'dumps' | 'pushes'
+type TabKey = 'logs' | 'dumps' | 'pushes' | 'rotations'
 
 const toast = useToastStore()
 const activeTab = ref<TabKey>('logs')
@@ -45,6 +52,12 @@ const pushFetching = ref(false)
 const clearingPushes = ref(false)
 const onlyPushChanges = ref(false)
 const expandedPushes = ref<Set<number>>(new Set())
+
+const rotationEntries = ref<RotationEvent[]>([])
+const rotationTotal = ref(0)
+const rotationFetching = ref(false)
+const expandedRotations = ref<Set<number>>(new Set())
+const onlyRotated = ref(true)
 
 const deleteModalOpen = ref(false)
 const deleteAll = ref(false)
@@ -164,6 +177,50 @@ function togglePush(seq: number) {
   expandedPushes.value = next
 }
 
+async function loadRotationHistory(silent = false) {
+  if (rotationFetching.value) return
+  rotationFetching.value = true
+  try {
+    const res = await accountsApi.getRotationHistory(200)
+    rotationEntries.value = res.entries
+    rotationTotal.value = res.total
+  } catch (err: unknown) {
+    if (!silent) {
+      toast.error(err instanceof Error ? err.message : '获取 Cookie 轮换流水失败')
+    }
+  } finally {
+    rotationFetching.value = false
+  }
+}
+
+const filteredRotationEntries = computed(() =>
+  onlyRotated.value
+    ? rotationEntries.value.filter((entry) => entry.changes.length > 0)
+    : rotationEntries.value,
+)
+
+function toggleRotation(seq: number) {
+  const next = new Set(expandedRotations.value)
+  if (next.has(seq)) {
+    next.delete(seq)
+  } else {
+    next.add(seq)
+  }
+  expandedRotations.value = next
+}
+
+const ROTATION_SOURCE_META: Record<RotationSource, { label: string; cls: string }> = {
+  save: { label: '浏览器保存', cls: 'bg-sky-50 text-sky-700' },
+  harvest: { label: '在途捕获', cls: 'bg-violet-50 text-violet-700' },
+  probe: { label: '探活回写', cls: 'bg-emerald-50 text-emerald-700' },
+  rotate: { label: 'RotateCookies', cls: 'bg-amber-50 text-amber-700' },
+  push: { label: '推送合并', cls: 'bg-slate-100 text-slate-600' },
+}
+
+function rotationSourceMeta(source: RotationSource) {
+  return ROTATION_SOURCE_META[source] || { label: source, cls: 'bg-gray-100 text-gray-500' }
+}
+
 function formatPushTime(at: number): string {
   return new Date(at * 1000).toLocaleString('zh-CN', { hour12: false })
 }
@@ -278,6 +335,8 @@ function switchTab(tab: TabKey) {
     void loadDumps()
   } else if (tab === 'pushes') {
     void loadPushHistory()
+  } else if (tab === 'rotations') {
+    void loadRotationHistory()
   } else {
     void loadLogs()
   }
@@ -349,15 +408,19 @@ async function confirmDelete() {
 
 onMounted(async () => {
   await Promise.all([loadLogs(true), loadDumps()])
-  pollTimer = setInterval(() => {
-    if (document.visibilityState === 'hidden') return
-    if (autoRefresh.value && activeTab.value === 'logs') {
-      void loadLogs()
-    }
-    if (activeTab.value === 'pushes') {
-      void loadPushHistory(true)
-    }
-  }, 2000)
+pollTimer = setInterval(() => {
+  if (document.visibilityState === 'hidden') return
+  if (autoRefresh.value && activeTab.value === 'logs') {
+    void loadLogs()
+  }
+  if (activeTab.value === 'pushes') {
+    void loadPushHistory(true)
+  }
+  if (activeTab.value === 'rotations') {
+    void loadRotationHistory(true)
+  }
+}, 2000)
+
 })
 
 onUnmounted(() => {
@@ -373,7 +436,7 @@ onUnmounted(() => {
           运行日志
         </h2>
         <p class="mt-1 text-xs text-gray-500">
-          在网页查看服务端最近日志、请求转储，以及每次浏览器 Cookie 推送与上一次的差异。
+          在网页查看服务端最近日志、请求转储，以及每次浏览器 Cookie 推送与上一次的差异、服务端 Cookie 轮换心跳。
         </p>
       </div>
 
@@ -393,6 +456,14 @@ onUnmounted(() => {
           @click="switchTab('pushes')"
         >
           Cookie 推送
+        </button>
+        <button
+          type="button"
+          class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+          :class="activeTab === 'rotations' ? 'bg-brand-50 text-brand-700' : 'text-gray-500 hover:text-gray-800'"
+          @click="switchTab('rotations')"
+        >
+          Cookie 轮换
         </button>
         <button
           type="button"
@@ -735,6 +806,138 @@ onUnmounted(() => {
             >
               合并后仍缺：{{ entry.merged_missing_advisory.join('、') }}
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-else-if="activeTab === 'rotations'"
+      class="bg-white border border-gray-200/80 rounded-2xl shadow-xs overflow-hidden"
+    >
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 px-5 py-3">
+        <div class="flex items-center gap-2 text-sm font-semibold text-gray-900">
+          <RefreshCw class="w-4 h-4 text-brand-600" />
+          <span>Cookie 轮换流水</span>
+          <span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
+            {{ rotationTotal }} 条
+          </span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-gray-600">
+            <input
+              v-model="onlyRotated"
+              type="checkbox"
+              class="h-3.5 w-3.5 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+            >
+            只看有变化的
+          </label>
+          <Button
+            size="sm"
+            variant="secondary"
+            :loading="rotationFetching"
+            @click="loadRotationHistory()"
+          >
+            <RefreshCw class="w-3.5 h-3.5" />
+            刷新
+          </Button>
+        </div>
+      </div>
+
+      <div class="border-b border-gray-100 bg-gray-50/60 px-5 py-2.5 text-[11px] leading-relaxed text-gray-500">
+        服务端每一次推进 Cookie 代次的记录：浏览器保存（save）、在途响应捕获（harvest）、探活回写（probe）、
+        RotateCookies 抢救（rotate）、推送合并（push）。这就是「自动续命」在跳的心跳——
+        各来源都长时间没有新事件，说明代次链停了。不显示 Cookie 明文，只显示值的短指纹；重启后清空。
+      </div>
+
+      <div class="h-[62vh] overflow-y-auto bg-slate-50/40">
+        <div
+          v-if="filteredRotationEntries.length === 0"
+          class="flex h-full flex-col items-center justify-center gap-2 text-xs text-gray-400"
+        >
+          <RefreshCw class="h-8 w-8 text-gray-300" />
+          <p v-if="rotationEntries.length > 0">
+            当前筛选下没有记录。取消「只看有变化的」可查看全部。
+          </p>
+          <p v-else>
+            暂无轮换记录。服务推进一次 Cookie（保存/探活回写/推送合并等）后，这里会出现记录。
+          </p>
+        </div>
+
+        <div
+          v-for="entry in filteredRotationEntries"
+          :key="entry.seq"
+          class="border-b border-gray-100 bg-white/70 px-5 py-3 last:border-0"
+        >
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+            <span class="text-[11px] text-gray-400">{{ formatPushTime(entry.at) }}</span>
+            <span
+              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+              :class="rotationSourceMeta(entry.source).cls"
+              :title="entry.reason"
+            >
+              {{ rotationSourceMeta(entry.source).label }}
+            </span>
+            <span class="text-xs font-semibold text-gray-900">{{ entry.account_id }}</span>
+            <span
+              class="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+              :class="entry.changes.length > 0 ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'"
+            >
+              {{ entry.changes.length > 0 ? `推进 ${entry.changes.length} 项` : '无键变化' }}
+            </span>
+            <button
+              type="button"
+              class="ml-auto inline-flex cursor-pointer items-center gap-0.5 rounded-lg px-1.5 py-1 text-[11px] text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+              @click="toggleRotation(entry.seq)"
+            >
+              <component
+                :is="expandedRotations.has(entry.seq) ? ChevronUp : ChevronDown"
+                class="h-3.5 w-3.5"
+              />
+              {{ expandedRotations.has(entry.seq) ? '收起' : '详情' }}
+            </button>
+          </div>
+
+          <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-gray-500">
+            <span>共 {{ entry.cookie_count }} 个 Cookie</span>
+            <span>指纹 <code class="font-mono text-gray-700">{{ entry.fingerprint }}</code></span>
+          </div>
+
+          <div
+            v-if="expandedRotations.has(entry.seq)"
+            class="mt-2 space-y-2 rounded-xl border border-gray-100 bg-gray-50/80 p-3"
+          >
+            <div class="text-[11px] text-gray-500">
+              {{ entry.reason }}
+            </div>
+            <div
+              v-if="entry.changes.length === 0"
+              class="text-[11px] text-gray-500"
+            >
+              本次保存没有 Cookie 键的值发生变化（仅整体指纹更新）。
+            </div>
+            <ul
+              v-else
+              class="space-y-1"
+            >
+              <li
+                v-for="change in entry.changes"
+                :key="change.name"
+                class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px]"
+              >
+                <code class="font-mono font-medium text-gray-800">{{ change.name }}</code>
+                <template v-if="change.before">
+                  <code class="font-mono text-gray-500">{{ change.before }}</code>
+                  <ArrowRight class="h-3 w-3 text-gray-400" />
+                  <code class="font-mono text-gray-800">{{ change.after }}</code>
+                </template>
+                <template v-else>
+                  <span class="text-gray-500">新值指纹</span>
+                  <code class="font-mono text-gray-800">{{ change.after }}</code>
+                </template>
+              </li>
+            </ul>
           </div>
         </div>
       </div>

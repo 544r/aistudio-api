@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
@@ -147,6 +148,7 @@ async def rotate_account_cookies(auth_path: str | Path) -> list[str]:
             target.name,
             ", ".join(sorted(set(changed))),
         )
+        _record_rotation_event(target, source="rotate", reason="RotateCookies 401 抢救")
     return changed
 
 
@@ -166,6 +168,37 @@ def _rotate_rescue_cooldown_ok(account_id: str) -> bool:
     if ok:
         _rotate_rescue_at[account_id] = time.time()
     return ok
+
+
+def _record_rotation_event(
+    auth_path: str | Path,
+    *,
+    source: str,
+    reason: str,
+) -> None:
+    """把 auth.json 的代次推进记入轮换流水（键名+短指纹，不含值）。"""
+    from aistudio_api.application.cookie_rotation_history import (
+        diff_cookie_values_as_changes,
+        get_rotation_history,
+        snapshot_cookie_values,
+    )
+
+    with suppress(Exception):
+        target = Path(auth_path)
+        state = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return
+        cookies = state.get("cookies")
+        get_rotation_history().record(
+            account_id=target.parent.name,
+            source=source,
+            kind="rotated",
+            reason=reason,
+            cookie_count=len(cookies) if isinstance(cookies, list) else 0,
+            changes=diff_cookie_values_as_changes(
+                None, snapshot_cookie_values(cookies)
+            ),
+        )
 
 
 def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[str]:
@@ -197,6 +230,7 @@ def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[st
         target.name,
         ", ".join(sorted(set(changed))),
     )
+    _record_rotation_event(target, source="probe", reason="探活响应 Set-Cookie 回写")
     return changed
 
 

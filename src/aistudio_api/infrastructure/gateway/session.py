@@ -644,6 +644,7 @@ class BrowserSession:
                 # 在途响应捕获的 Set-Cookie 可能比浏览器 jar 里的代次更新
                 # （fetch 响应头先于 jar 序列化），落盘前合并进去
                 pending = list(self._pending_rotations)
+                harvested = bool(pending)
                 if pending:
                     from aistudio_api.infrastructure.account.cookie_parser import (
                         apply_set_cookie_lines,
@@ -667,10 +668,51 @@ class BrowserSession:
                 )
                 if saved:
                     self._cookie_fingerprints[key] = fingerprint
+                    self._record_rotation_event(
+                        key,
+                        current_cookies,
+                        source="harvest" if harvested else "save",
+                        reason="在途响应捕获" if harvested else "浏览器会话保存",
+                    )
                 return saved
             except Exception as e:
                 log.debug("自动保存 Cookie 失败: %s", e)
                 return False
+
+    def _record_rotation_event(
+        self,
+        auth_file: str,
+        current_cookies: list[dict[str, object]],
+        *,
+        source: str,
+        reason: str,
+    ) -> None:
+        """把落盘的代次变化记入轮换流水（键名+短指纹，不含值）。"""
+        from aistudio_api.application.cookie_rotation_history import (
+            diff_cookie_values_as_changes,
+            get_rotation_history,
+            snapshot_cookie_values,
+        )
+
+        with suppress(Exception):
+            history = get_rotation_history()
+            after = snapshot_cookie_values(current_cookies)
+            before: dict[str, str] = {}
+            with suppress(Exception):
+                existing = json.loads(Path(auth_file).read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    before = snapshot_cookie_values(existing.get("cookies"))
+            # save_browser_cookies 刚写入，读回来的就是 after——before 用内存里
+            # 上次的 jar 快照（首次为空），保证有意义的 diff
+            history.record(
+                account_id=Path(auth_file).parent.name,
+                source=source,
+                kind="rotated",
+                reason=reason,
+                cookie_count=len(current_cookies),
+                fingerprint=_cookie_fingerprint(current_cookies),
+                changes=diff_cookie_values_as_changes(before, after),
+            )
 
     def start_cookie_persistence(
         self, interval_s: float = COOKIE_SAVE_INTERVAL_S
