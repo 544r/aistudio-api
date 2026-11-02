@@ -627,17 +627,25 @@ class BrowserSession:
         auth_user = self.get_current_auth_user()
         return await extract_account_tier(target, auth_user=auth_user)
 
-    async def reload_current_account_cookies(self, page: CDPPage | None = None) -> bool:
+    async def reload_current_account_cookies(
+        self,
+        page: CDPPage | None = None,
+        *,
+        preserve_rolling: bool = True,
+    ) -> bool:
         """热刷新当前账号的 Cookie（油猴推送覆盖走这里）。
 
-        只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——推送来自另一台
+        默认只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——推送来自另一台
         浏览器，它那份代次可能已经比服务端落后一到几轮。
+
+        `preserve_rolling=False` 用于 RotateCookies 抢救：auth.json 刚被服务端
+        换成了新一代滚动代次，必须整罐重灌，重试才会真的带上新代次。
         """
         target = page or (self.active_context.page if self.active_context else None)
         return bool(
             target
             and await load_cookies_to_page(
-                target, self._auth_file, preserve_rolling=True
+                target, self._auth_file, preserve_rolling=preserve_rolling
             )
         )
 

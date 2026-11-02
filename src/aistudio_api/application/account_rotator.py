@@ -873,7 +873,7 @@ class AccountRotator:
             model, cooldown_seconds=cooldown_seconds
         )
         logger.warning(
-            "账号 %s 权限被拒绝 (HTTP 403)",
+            "账号 %s 认证异常 (401/403)",
             account_id,
         )
         self.save_state()
@@ -899,9 +899,9 @@ class AccountRotator:
         changed = was_expired != stats.session_expired
         if changed:
             if stats.session_expired:
-                logger.error("账号巡检发现登录态失效，已暂停使用: %s", account_id)
+                logger.error("账号登录态已标记失效，暂停使用: %s", account_id)
             else:
-                logger.info("账号巡检确认登录态已恢复: %s", account_id)
+                logger.info("账号登录态已恢复: %s", account_id)
             self.save_state()
         return changed
 

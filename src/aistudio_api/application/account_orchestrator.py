@@ -63,6 +63,32 @@ async def _try_rotate_cookies_repair(account_id: str) -> bool:
         return False
     if not changed:
         return False
+
+    # RotateCookies 只改了 auth.json。当前账号若正在使用，浏览器罐里仍是旧代次，
+    # 重试会原样再撞一次 401；必须把新代次灌回页面（此时 auth.json 就是最新值，
+    # 用 preserve_rolling=False 整罐重灌）。
+    rotator = runtime_state.rotator
+    if rotator is not None:
+        rotator.set_session_expired(account_id, False)
+    client = runtime_state.client
+    session = getattr(client, "session", None) if client is not None else None
+    active = account_service.get_active_account()
+    if (
+        session is not None
+        and active is not None
+        and active.id == account_id
+        and session.is_ready
+    ):
+        reloaded = await session.reload_current_account_cookies(
+            preserve_rolling=False
+        )
+        if not reloaded:
+            logger.warning(
+                "账号 %s RotateCookies 成功，但新代次未能灌回浏览器，交给后续抢救链",
+                account_id,
+            )
+            return False
+
     logger.info("账号 %s 已通过 RotateCookies 换新一代代次", account_id)
     return True
 

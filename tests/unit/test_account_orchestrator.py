@@ -624,3 +624,101 @@ async def test_switch_target_login_redirect_marks_expired():
         runtime_state.rotator = orig_rotator
         runtime_state.account_service = orig_service
         runtime_state.client = orig_client
+
+
+@pytest.mark.asyncio
+async def test_rotate_cookies_rescue_reloads_active_browser(monkeypatch):
+    """RotateCookies 成功后必须把新代次灌回当前浏览器，并清掉失效标记。
+
+    只改 auth.json 不重载页面时，重试仍会拿旧 Cookie 再撞一次 401，抢救等于没做。
+    """
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.application import (
+        account_health,
+        account_orchestrator as orchestrator,
+    )
+
+    mock_rotator = MagicMock(spec=AccountRotator)
+    mock_service = MagicMock(spec=AccountService)
+    mock_client = MagicMock(spec=AIStudioClient)
+    mock_session = MagicMock()
+    mock_session.is_ready = True
+    mock_session.reload_current_account_cookies = AsyncMock(return_value=True)
+    mock_client.session = mock_session
+
+    active = AccountMeta(
+        id="acc_1", name="A", email="a@example.com", created_at="2026-01-01"
+    )
+    mock_service.get_account_auth_path = MagicMock(return_value="C:/tmp/auth.json")
+    mock_service.get_active_account = MagicMock(return_value=active)
+
+    async def fake_rotate(_path):
+        return ["SIDCC"]
+
+    monkeypatch.setattr(account_health, "_rotate_rescue_cooldown_ok", lambda _id: True)
+    monkeypatch.setattr(account_health, "rotate_account_cookies", fake_rotate)
+
+    orig_rotator = runtime_state.rotator
+    orig_service = runtime_state.account_service
+    orig_client = runtime_state.client
+    try:
+        runtime_state.rotator = mock_rotator
+        runtime_state.account_service = mock_service
+        runtime_state.client = mock_client
+
+        assert await orchestrator._try_rotate_cookies_repair("acc_1") is True
+        mock_rotator.set_session_expired.assert_called_once_with("acc_1", False)
+        mock_session.reload_current_account_cookies.assert_awaited_once_with(
+            preserve_rolling=False
+        )
+    finally:
+        runtime_state.rotator = orig_rotator
+        runtime_state.account_service = orig_service
+        runtime_state.client = orig_client
+
+
+@pytest.mark.asyncio
+async def test_rotate_cookies_rescue_falls_through_when_reload_fails(monkeypatch):
+    """新代次灌不回浏览器时不能假装成功，要让后续重导航/切号继续接管。"""
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.application import (
+        account_health,
+        account_orchestrator as orchestrator,
+    )
+
+    mock_rotator = MagicMock(spec=AccountRotator)
+    mock_service = MagicMock(spec=AccountService)
+    mock_client = MagicMock(spec=AIStudioClient)
+    mock_session = MagicMock()
+    mock_session.is_ready = True
+    mock_session.reload_current_account_cookies = AsyncMock(return_value=False)
+    mock_client.session = mock_session
+
+    active = AccountMeta(
+        id="acc_1", name="A", email="a@example.com", created_at="2026-01-01"
+    )
+    mock_service.get_account_auth_path = MagicMock(return_value="C:/tmp/auth.json")
+    mock_service.get_active_account = MagicMock(return_value=active)
+
+    async def fake_rotate(_path):
+        return ["SIDCC"]
+
+    monkeypatch.setattr(account_health, "_rotate_rescue_cooldown_ok", lambda _id: True)
+    monkeypatch.setattr(account_health, "rotate_account_cookies", fake_rotate)
+
+    orig_rotator = runtime_state.rotator
+    orig_service = runtime_state.account_service
+    orig_client = runtime_state.client
+    try:
+        runtime_state.rotator = mock_rotator
+        runtime_state.account_service = mock_service
+        runtime_state.client = mock_client
+
+        assert await orchestrator._try_rotate_cookies_repair("acc_1") is False
+        mock_rotator.set_session_expired.assert_called_once_with("acc_1", False)
+    finally:
+        runtime_state.rotator = orig_rotator
+        runtime_state.account_service = orig_service
+        runtime_state.client = orig_client
