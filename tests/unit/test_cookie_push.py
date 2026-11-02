@@ -470,6 +470,140 @@ async def test_push_cookies_refreshes_whole_cookie_group():
 
 
 @pytest.mark.asyncio
+async def test_push_cookies_discovers_all_sub_accounts(monkeypatch):
+    target = _account("acc_1", cookie_id="cookie_shared")
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def fake_discover(_cookies):
+        return [
+            {"auth_user": "0", "email": "user@example.com", "tier": "Free"},
+            {"auth_user": "1", "email": "second@example.com", "tier": "Pro"},
+        ]
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_google_accounts_infinite",
+        fake_discover,
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": _full_jar(),
+                "email": "user@example.com",
+                "discover_all": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated_accounts"] == 1
+    assert body["discovered_accounts"] == 1
+
+    created = [
+        call.kwargs
+        for call in svc.save_account_from_cookies.call_args_list
+        if call.kwargs.get("account_id") is None
+    ]
+    assert len(created) == 1
+    assert created[0]["auth_user"] == "1"
+    assert created[0]["email"] == "second@example.com"
+    assert created[0]["cookie_id"] == "cookie_shared"
+    assert created[0]["tier"] == "Pro"
+    runtime_state.rotator.add_account.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_discovery_updates_existing_and_skips_blocked(monkeypatch):
+    from aistudio_api.config import settings
+
+    monkeypatch.setattr(settings, "blocked_emails", frozenset({"main@example.com"}))
+    target = _account("acc_1", cookie_id="cookie_shared")
+    sibling = _account(
+        "acc_2",
+        email="second@example.com",
+        auth_user="1",
+        cookie_id="cookie_other",
+    )
+    svc = _mock_service([target, sibling])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def fake_discover(_cookies):
+        return [
+            {"auth_user": "0", "email": "user@example.com", "tier": "Free"},
+            {"auth_user": "1", "email": "second@example.com", "tier": "Free"},
+            {"auth_user": "2", "email": "main@example.com", "tier": "Free"},
+        ]
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_google_accounts_infinite",
+        fake_discover,
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": _full_jar(),
+                "email": "user@example.com",
+                "discover_all": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["discovered_accounts"] == 1
+    saved_ids = {
+        call.kwargs.get("account_id")
+        for call in svc.save_account_from_cookies.call_args_list
+    }
+    assert saved_ids == {"acc_1", "acc_2"}
+    sibling_call = next(
+        call.kwargs
+        for call in svc.save_account_from_cookies.call_args_list
+        if call.kwargs.get("account_id") == "acc_2"
+    )
+    # 已有账号沿用原来的 cookie 分组，避免把不同浏览器的罐并成一组
+    assert sibling_call["cookie_id"] == "cookie_other"
+    assert all(
+        call.kwargs.get("email") != "main@example.com"
+        for call in svc.save_account_from_cookies.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_discovery_failure_keeps_push_success(monkeypatch):
+    target = _account()
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    async def boom(_cookies):
+        raise RuntimeError("probe down")
+
+    monkeypatch.setattr(
+        "aistudio_api.api.routes_accounts.probe_google_accounts_infinite",
+        boom,
+    )
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={
+                "cookies": _full_jar(),
+                "email": "user@example.com",
+                "discover_all": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["discovered_accounts"] == 0
+    svc.save_account_from_cookies.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_push_cookies_injects_into_active_browser():
     target = _account()
     svc = _mock_service([target])
@@ -1036,8 +1170,6 @@ async def test_push_jar_with_accounts_domain_cookies_roundtrip():
 
     assert resp.status_code == 200
     saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
-    by_name = {
-        (c["name"], c.get("domain")): c["value"] for c in saved["cookies"]
-    }
+    by_name = {(c["name"], c.get("domain")): c["value"] for c in saved["cookies"]}
     assert by_name[("LSID", "accounts.google.com")] == "lsid-value"
     assert by_name[("__Host-1PLSID", "accounts.google.com")] == "plsid-value"

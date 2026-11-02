@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIStudio API Cookie Pusher
 // @namespace    aistudio-api-push
-// @version      1.3.2
+// @version      1.3.3
 // @description  定时把 AI Studio 页面上的最新 Cookie 推送到自建 aistudio-api 服务，服务器自动覆盖账号凭证并热注入浏览器，替代"手动粘贴导入、过期再重贴"
 // @author       aistudio-api
 // @match        https://aistudio.google.com/*
@@ -50,6 +50,9 @@
  *    「含 RotateCookies 原料」；抓不到也不影响正常推送。
  *    v1.3.2 修复：@match 未声明 accounts.google.com 时，篡改猴会静默
  *    拒绝该域的 Cookie 查询（返回空），导致永远抓不到——已补上声明。
+ *    v1.3.3 起推送会请求服务端用同一份登录罐探测全部 /u/N 子账号并补登：
+ *    一次推送即可把浏览器里登录的几个号都登记上，不必切号再推。设置了
+ *    「允许推送的账号」白名单时不开启，避免把白名单外的号带上去。
  *    脚本 UI / 推送 / 定时器仍只在 aistudio.google.com 页面生效。
  *
  * 说明：
@@ -100,7 +103,7 @@
     ];
 
     const DEFAULT_INTERVAL_MIN = 60;
-    const PUSH_TIMEOUT_MS = 30000;
+    const PUSH_TIMEOUT_MS = 45000;
     const INITIAL_PUSH_DELAY_MS = 5000;
     // 自动刷新：默认关闭，最少 30 分钟一次
     const DEFAULT_REFRESH_MIN = 0;
@@ -691,6 +694,9 @@
                 email: detectedEmail || undefined,
                 account_id: getBoundAccountId() || undefined,
                 source: "userscript",
+                // 多账号浏览器共用一份登录罐：让服务端顺手把全部 u/N 子号都登记上。
+                // 设置了白名单时关闭，避免把用户明确排除的主号也带上去。
+                discover_all: cfg.allowedEmails.length === 0,
             };
             const headers = { "Content-Type": "application/json" };
             // 密码同时走 header 与 query：header 只允许 Latin-1，中文/特殊字符密码
@@ -722,7 +728,10 @@
                           : "登录态未验证";
                 const text =
                     `✅ 已推送（${validText}）` +
-                    (data.updated_accounts > 1 ? `，整组刷新 ${data.updated_accounts} 个账号` : "");
+                    (data.updated_accounts > 1 ? `，整组刷新 ${data.updated_accounts} 个账号` : "") +
+                    (data.discovered_accounts > 0
+                        ? `，自动登记 ${data.discovered_accounts} 个子号`
+                        : "");
                 log(
                     `${text}：${data.name || data.account_id}` +
                         (data.created ? "（新建账号）" : "") +

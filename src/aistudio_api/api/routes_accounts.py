@@ -25,6 +25,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     parse_cookie_string,
     probe_account_benefit_tier,
     probe_account_email,
+    probe_google_accounts_infinite,
 )
 from aistudio_api.infrastructure.utils.common import mask_email
 
@@ -68,6 +69,164 @@ def _has_server_rotated_cookies(existing_state: dict[str, object] | None) -> boo
     if not isinstance(existing_state, dict):
         return False
     return existing_state.get("server_rotated") is True
+
+
+def _load_account_state(
+    account_service: AccountService, account_id: str
+) -> dict[str, object] | None:
+    """读取账号现有 auth.json，失败时当作没有历史状态。"""
+    import json
+    from pathlib import Path
+
+    with contextlib.suppress(Exception):
+        acc_path = account_service.get_account_auth_path(account_id)
+        if acc_path and Path(acc_path).is_file():
+            raw_existing = json.loads(Path(acc_path).read_text(encoding="utf-8"))
+            if isinstance(raw_existing, dict):
+                return raw_existing
+    return None
+
+
+def _merge_push_state(
+    existing_state: dict[str, object] | None,
+    storage_state: dict[str, object],
+    *,
+    account_expired: bool,
+) -> dict[str, object]:
+    """把推送罐并入账号现有 auth.json。
+
+    滚动代次凭据（*PSIDTS / *PSIDRTS / SIDCC / *PSIDCC）不能盲目覆盖：
+    要覆盖的对象必须是“服务端自己推进过”的那份（探活回写 / 浏览器保活
+    落盘），否则会出现两边互相顶旧代次。判据是 auth.json 里的代次来源
+    ——服务端从未推进过的账号（auth.json 就是上次推送的原文），推送值
+    天然是最新代次，应该接受；标记了 `server_rotated` 的账号才保护。
+    """
+    keep_rolling: tuple[str, ...] = ()
+    if _has_server_rotated_cookies(existing_state) and not account_expired:
+        keep_rolling = tuple(ROLLING_COOKIE_NAMES)
+    merged_state = merge_storage_states(
+        existing_state, storage_state, keep_base_names=keep_rolling
+    )
+    # 推送成为滚动代次的最新持有者：清除“服务端推进”标记，让下一次
+    # 浏览器/探活推进重新取得保护资格。
+    return {k: v for k, v in merged_state.items() if k != "server_rotated"}
+
+
+async def _discover_push_sub_accounts(
+    *,
+    probe_cookies: dict[str, str],
+    storage_state: dict[str, object],
+    target: AccountMeta,
+    updated_ids: set[str],
+    session_valid: bool | None,
+    account_service: AccountService,
+    runtime_state: RuntimeState,
+) -> list[AccountMeta]:
+    """用同一份 Cookie 罐探测全部 u/N，把尚未登记的号补进同一 cookie 组。
+
+    浏览器里多账号共用一份登录罐，`/u/N` 只是索引；推送一次就应把整罐覆盖
+    的账号都登记上，避免用户切号再推或重复导入产生多条记录。探测失败只降级
+    为“只更新当前账号”，不影响推送本身成功。
+    """
+    try:
+        # 推送响应有超时预算，探测最多占 15s；超时按“只更新当前账号”降级。
+        probed = await asyncio.wait_for(
+            probe_google_accounts_infinite(probe_cookies), timeout=15.0
+        )
+    except Exception as exc:
+        log.warning("推送后子账号探测失败，本次仅更新当前账号: %s", exc)
+        return []
+    if not probed:
+        return []
+
+    accounts = account_service.list_accounts()
+    group_cookie_id = target.cookie_id
+    touched: list[AccountMeta] = []
+    for item in probed:
+        u_idx = str(item.get("auth_user") or "0")
+        email = str(item.get("email") or "").strip().lower() or None
+        probed_tier = str(item.get("tier") or "Free")
+        if is_blocked_email(email):
+            log.info(
+                "跳过禁用名单中的子账号: %s (u/%s)",
+                mask_email(email or ""),
+                u_idx,
+            )
+            continue
+
+        existing: AccountMeta | None = None
+        if email:
+            existing = next(
+                (
+                    a
+                    for a in accounts
+                    if (a.email or "").strip().lower() == email
+                    and (a.auth_user or "0") == u_idx
+                ),
+                None,
+            )
+        if existing is None and group_cookie_id:
+            existing = next(
+                (
+                    a
+                    for a in accounts
+                    if (a.auth_user or "0") == u_idx
+                    and (a.cookie_id or "") == group_cookie_id
+                ),
+                None,
+            )
+        # 当前推送已经整组刷新过的账号不再重复写盘
+        if existing is not None and existing.id in updated_ids:
+            continue
+
+        if existing is not None:
+            merged_state = _merge_push_state(
+                _load_account_state(account_service, existing.id),
+                storage_state,
+                account_expired=_is_account_session_expired(runtime_state, existing.id),
+            )
+            resolved_tier = existing.tier or "Free"
+            if resolved_tier == "Free" and probed_tier != "Free":
+                resolved_tier = probed_tier
+            saved = account_service.save_account_from_cookies(
+                name=existing.name,
+                email=existing.email or email,
+                storage_state=merged_state,
+                account_id=existing.id,
+                auth_user=u_idx,
+                cookie_id=existing.cookie_id,
+                tier=resolved_tier,
+                enabled=existing.enabled,
+                group=existing.group or "default",
+                notes=existing.notes or "",
+            )
+            log.info(
+                "推送自动补登子账号: %s (u/%s, 已有记录)",
+                mask_email(existing.email or email or "") or existing.id,
+                u_idx,
+            )
+        else:
+            saved = account_service.save_account_from_cookies(
+                name=f"Google Account (u/{u_idx})",
+                email=email,
+                storage_state=storage_state,
+                auth_user=u_idx,
+                cookie_id=group_cookie_id,
+                tier=probed_tier,
+            )
+            log.info(
+                "推送自动登记子账号: %s (u/%s, 新建)",
+                mask_email(email or "") or f"u/{u_idx}",
+                u_idx,
+            )
+
+        rotator = runtime_state.rotator
+        if rotator is not None:
+            rotator.add_account(saved.id)
+            if session_valid is not False:
+                rotator.set_session_expired(saved.id, False)
+        touched.append(saved)
+    return touched
 
 
 class AccountResponse(BaseModel):
@@ -206,6 +365,9 @@ class PushCookiesRequest(BaseModel):
     account_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_\-\.@]+$")
     auth_user: str = "0"
     source: str | None = None
+    # 一次推送登记整罐覆盖的全部 u/N 子账号（浏览器多账号共用一份登录罐）。
+    # 油猴在未设置账号白名单时默认开启。
+    discover_all: bool = False
 
 
 class PushCookiesResponse(BaseModel):
@@ -214,6 +376,7 @@ class PushCookiesResponse(BaseModel):
     email: str | None = None
     cookie_count: int
     updated_accounts: int = 1
+    discovered_accounts: int = 0
     created: bool = False
     session_valid: bool | None = None
     injected: bool = False
@@ -368,7 +531,6 @@ async def push_cookies(
     Cookie 真实的 domain / path / expires；同一 cookie_id 分组的账号共享
     同一份 jar，推一次应整组刷新。
     """
-    import json
     import secrets
 
     from aistudio_api.application.account_health import probe_account_session
@@ -505,40 +667,17 @@ async def push_cookies(
             if target.cookie_id and (a.cookie_id or "") == target.cookie_id
         ]
         updated_accounts = group or [target]
-        from pathlib import Path
 
         for acc in updated_accounts:
             # 浏览器扩展读不到分区 Cookie（如 __Secure-1PSID）时，推送的罐
             # 可能缺项；与账号现有 auth.json 合并，保留浏览器看不见但仍在
             # 工作的旧 Cookie，新推送的同名 Cookie 优先。
-            existing_state: dict[str, object] | None = None
-            with contextlib.suppress(Exception):
-                acc_path = account_service.get_account_auth_path(acc.id)
-                if acc_path and Path(acc_path).is_file():
-                    raw_existing = json.loads(
-                        Path(acc_path).read_text(encoding="utf-8")
-                    )
-                    if isinstance(raw_existing, dict):
-                        existing_state = raw_existing
-            # 滚动代次凭据（*PSIDTS / *PSIDRTS / SIDCC / *PSIDCC）不能盲目覆盖：
-            # 要覆盖的对象必须是“服务端自己推进过”的那份（探活回写 / 浏览器保活
-            # 落盘），否则会出现两边互相顶旧代次。判据是 auth.json 里的代次来源
-            # ——服务端从未推进过的账号（auth.json 就是上次推送的原文），推送值
-            # 天然是最新代次，应该接受；标记了 _server_rotated 的账号才保护。
-            keep_rolling: tuple[str, ...] = ()
-            if _has_server_rotated_cookies(existing_state) and not (
-                _is_account_session_expired(runtime_state, acc.id)
-            ):
-                keep_rolling = tuple(ROLLING_COOKIE_NAMES)
-            merged_state = merge_storage_states(
-                existing_state, storage_state, keep_base_names=keep_rolling
+            existing_state = _load_account_state(account_service, acc.id)
+            merged_state = _merge_push_state(
+                existing_state,
+                storage_state,
+                account_expired=_is_account_session_expired(runtime_state, acc.id),
             )
-            # 推送成为滚动代次的最新持有者：清除“服务端推进”标记，让下一次
-            # 浏览器/探活推进重新取得保护资格。
-            if "server_rotated" in merged_state:
-                merged_state = {
-                    k: v for k, v in merged_state.items() if k != "server_rotated"
-                }
             if acc.id == target.id:
                 merged_for_target = merged_state
             with contextlib.suppress(Exception):
@@ -650,6 +789,24 @@ async def push_cookies(
         for acc in updated_accounts:
             runtime_state.rotator.set_session_expired(acc.id, True)
 
+    discovered: list[AccountMeta] = []
+    if req.discover_all:
+        discovered = await _discover_push_sub_accounts(
+            probe_cookies=probe_cookies,
+            storage_state=merged_for_target,
+            target=target,
+            updated_ids={acc.id for acc in updated_accounts},
+            session_valid=session_valid,
+            account_service=account_service,
+            runtime_state=runtime_state,
+        )
+        if discovered:
+            log.info(
+                "推送自动登记 %d 个子账号: %s",
+                len(discovered),
+                ", ".join(f"u/{acc.auth_user}" for acc in discovered),
+            )
+
     injected = False
     browser_session = runtime_state.client._session if runtime_state.client else None
     active = account_service.get_active_account()
@@ -690,12 +847,13 @@ async def push_cookies(
 
     log.info(
         "收到浏览器 Cookie 推送: account=%s, email=%s, cookies=%d, updated=%d, "
-        "created=%s, injected=%s, session_valid=%s, source=%s, "
+        "discovered=%d, created=%s, injected=%s, session_valid=%s, source=%s, "
         "fingerprint=%s, diff=%d",
         target.name,
         mask_email(target.email) if target.email else "-",
         len(cookie_list),
         len(updated_accounts),
+        len(discovered),
         created,
         injected,
         session_valid,
@@ -709,6 +867,7 @@ async def push_cookies(
         email=target.email,
         cookie_count=len(cookie_list),
         updated_accounts=len(updated_accounts),
+        discovered_accounts=len(discovered),
         created=created,
         session_valid=session_valid,
         injected=injected,
