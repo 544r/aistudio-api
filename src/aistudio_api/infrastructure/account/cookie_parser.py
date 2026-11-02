@@ -756,7 +756,15 @@ async def probe_google_accounts_infinite(
     Returns:
         有效账号列表，例如 [{"auth_user": "0", "status_code": 200, "name": "Google Account (u/0)"}, ...]
     """
-    cookie_dict = parse_raw_cookies(raw_or_dict)
+    # 推送路径传进来的是 {name: value} 字典；parse_raw_cookies 只认字符串 /
+    # Cookie-Editor 结构，对裸字典会退化成按 "=" 拆 JSON 文本，结果为空。
+    # 与 probe_account_emails_map 保持同一套判断，否则推送侧永远探不到子号。
+    cookie_dict = (
+        raw_or_dict
+        if isinstance(raw_or_dict, dict)
+        and all(isinstance(v, str) for v in raw_or_dict.values())
+        else parse_raw_cookies(raw_or_dict)
+    )
     if not cookie_dict:
         return []
 

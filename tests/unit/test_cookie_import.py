@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 from aistudio_api.infrastructure.account.cookie_parser import (
@@ -662,3 +663,51 @@ def test_note_pending_rotation_merges_into_saved_jar():
     merged, _ = apply_set_cookie_lines(browser_jar, session._pending_rotations)
     by_name = {c["name"]: c["value"] for c in merged["cookies"]}
     assert by_name["__Secure-1PSIDTS"] == "sidts-gen-5"
+
+
+@pytest.mark.asyncio
+async def test_probe_google_accounts_infinite_accepts_name_value_dict(monkeypatch):
+    """推送路径传的是 {name: value} 字典，不能交给 parse_raw_cookies 再解析一次。
+
+    以前这里会退化成按 "=" 拆 JSON 文本，cookie_dict 为空直接返回 []，导致
+    推送永远 discovered=0、一个子号都建不出来。
+    """
+    from aistudio_api.infrastructure.account import cookie_parser
+
+    async def fake_emails(_cookies, auth_user="0"):
+        return {"0": "first@example.com", "1": "second@example.com"}
+
+    monkeypatch.setattr(cookie_parser, "probe_account_emails_map", fake_emails)
+
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            self.text = ""
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, **kwargs):
+            if "ListModels" in url:
+                user = (headers or {}).get("X-Goog-AuthUser")
+                return FakeResponse(200 if user in ("0", "1") else 401)
+            return FakeResponse(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    probed = await cookie_parser.probe_google_accounts_infinite(
+        {"SID": "sid-value", "SAPISID": "sapisid-value"}
+    )
+
+    assert [item["auth_user"] for item in probed] == ["0", "1"]
+    assert [item["email"] for item in probed] == [
+        "first@example.com",
+        "second@example.com",
+    ]
