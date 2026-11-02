@@ -55,6 +55,26 @@ async def test_session_readiness_gate_state_machine():
 
 
 @pytest.mark.asyncio
+async def test_gate_preserves_original_error_type():
+    """业务异常（401/403）必须保持原类型抛出，重试链才能按类型切号。
+
+    包装成 RuntimeError 会让 handle_attempt_exception 认不出 SessionExpiredError，
+    请求直接 500，永远不会切到备用账号。
+    """
+    from aistudio_api.domain.errors import AuthError, SessionExpiredError
+
+    gate = SessionReadinessGate()
+    gate.set_failed(SessionExpiredError("Cookie 认证失败，被重定向到登录页"))
+    with pytest.raises(SessionExpiredError, match="被重定向到登录页"):
+        await gate.wait_ready()
+
+    gate2 = SessionReadinessGate()
+    gate2.set_failed(AuthError("禁止访问"))
+    with pytest.raises(AuthError):
+        await gate2.wait_ready()
+
+
+@pytest.mark.asyncio
 async def test_session_context_event_driven_draining():
     """Verify decr_in_flight sets drain_event when count reaches 0."""
     mock_page = MagicMock(spec=CDPPage)

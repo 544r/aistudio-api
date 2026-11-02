@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from aistudio_api.domain.errors import AistudioError
+
 if TYPE_CHECKING:
     from aistudio_api.infrastructure.browser.cdp_client import CDPPage
 
@@ -101,9 +103,7 @@ class SessionReadinessGate:
             return self._active_context
 
         if self._state == SessionState.FAILED and self._last_error:
-            raise RuntimeError(
-                f"Session transition failed: {self._last_error}"
-            ) from self._last_error
+            self._raise_transition_failure()
 
         await self._event.wait()
 
@@ -113,8 +113,18 @@ class SessionReadinessGate:
             raise RuntimeError("Session active page closed unexpectedly")
 
         if self._state == SessionState.FAILED and self._last_error:
-            raise RuntimeError(
-                f"Session transition failed: {self._last_error}"
-            ) from self._last_error
+            self._raise_transition_failure()
 
         raise RuntimeError(f"Session not ready: current state={self._state}")
+
+    def _raise_transition_failure(self) -> None:
+        """Re-raise transition failure with its original type preserved.
+
+        上游把失败包装成 RuntimeError 会让 401/403 重试链按类型分流时认不出
+        登录态失效，请求直接 500 而不切号。业务异常必须保持原类型原样抛出。
+        """
+        err = self._last_error
+        assert err is not None
+        if isinstance(err, AistudioError):
+            raise err
+        raise RuntimeError(f"Session transition failed: {err}") from err
