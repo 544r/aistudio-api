@@ -15,6 +15,7 @@ from aistudio_api.api.dependencies import (
     get_runtime_state,
 )
 from aistudio_api.config import is_blocked_email
+from aistudio_api.domain.errors import SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
     ROLLING_COOKIE_NAMES,
@@ -799,7 +800,21 @@ async def activate_account(
     if browser_session is None:
         raise HTTPException(status_code=503, detail="服务未就绪")
 
-    account = await account_service.activate_account(account_id, browser_session)
+    try:
+        account = await account_service.activate_account(account_id, browser_session)
+    except SessionExpiredError as exc:
+        # 手动激活也会被 Google 重定向到登录页：同样要记账，否则 UI 会一直
+        # 显示“就绪”，用户点一次激活失败一次却看不到任何状态变化。
+        if runtime_state.rotator is not None:
+            runtime_state.rotator.record_session_expired(account_id)
+        log.error("手动激活账号 %s 失败（被重定向到登录页）: %s", account_id, exc)
+        raise HTTPException(
+            status_code=409,
+            detail=f"账号 {account_id} 登录态已失效：{exc}",
+        ) from exc
+    except Exception as exc:
+        log.warning("手动激活账号 %s 失败: %s", account_id, exc)
+        raise HTTPException(status_code=502, detail=f"切换账号失败：{exc}") from exc
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在或切换失败")
     if runtime_state.rotator:

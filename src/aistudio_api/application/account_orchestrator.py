@@ -6,6 +6,7 @@ import asyncio
 import time
 
 from aistudio_api.api.state import runtime_state
+from aistudio_api.domain.errors import SessionExpiredError
 from aistudio_api.infrastructure.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
@@ -254,10 +255,24 @@ async def try_switch_account(
             return False
 
         if current_id is None or next_account.id != current_id:
-            result = await account_service.activate_account(
-                next_account.id,
-                client.session,
-            )
+            try:
+                result = await account_service.activate_account(
+                    next_account.id,
+                    client.session,
+                )
+            except SessionExpiredError as exc:
+                # 切换目标本身被 Google 重定向到登录页：这是硬证据，必须记账，
+                # 否则账号会一直显示“就绪”，每次被选中都让请求失败一次。
+                logger.error(
+                    "切换到账号 %s 失败（被重定向到登录页），标记登录态失效: %s",
+                    next_account.id,
+                    exc,
+                )
+                rotator.record_session_expired(next_account.id, model=model)
+                return False
+            except Exception as exc:
+                logger.warning("切换到账号 %s 失败: %s", next_account.id, exc)
+                return False
             if result is not None:
                 rotator.clear_cooldown(next_account.id, model=model)
                 _last_switch_time = time.time()
@@ -276,10 +291,22 @@ async def try_switch_account(
                 current_id,
             )
             client.clear_templates()
-            result = await account_service.activate_account(
-                current_id,
-                client.session,
-            )
+            try:
+                result = await account_service.activate_account(
+                    current_id,
+                    client.session,
+                )
+            except SessionExpiredError as exc:
+                logger.error(
+                    "账号 %s 刷新后仍被重定向到登录页，标记登录态失效: %s",
+                    current_id,
+                    exc,
+                )
+                rotator.record_session_expired(current_id, model=model)
+                return False
+            except Exception as exc:
+                logger.warning("账号 %s 刷新会话失败: %s", current_id, exc)
+                return False
             if result is not None:
                 rotator.clear_cooldown(current_id, model=model)
                 _last_switch_time = time.time()

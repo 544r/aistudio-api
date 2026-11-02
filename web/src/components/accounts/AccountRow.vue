@@ -303,6 +303,16 @@ async function handleDetectTier() {
           就绪
         </div>
 
+        <!-- 当前激活但已进入鉴权冷却：激活徽章会盖住冷却提示，这里补一个警示 -->
+        <div
+          v-if="isEnabled && active && !account.session_expired && account.auth_cooldown && account.auth_cooldown > 0"
+          class="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200"
+          :title="`该账号最近一次请求被判定鉴权异常，约 ${Math.ceil(account.auth_cooldown / 60)} 分钟后可再次调度；巡检探活会给出最终结论`"
+        >
+          <Clock class="w-3 h-3" />
+          <span>冷却 {{ Math.ceil(account.auth_cooldown / 60) }} 分钟</span>
+        </div>
+
         <!-- Action Buttons -->
         <div class="flex items-center gap-1.5 ml-1">
           <!-- 恢复按钮 -->

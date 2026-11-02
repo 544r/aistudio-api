@@ -184,8 +184,19 @@ async def handle_attempt_exception(
                     refreshed = await account_svc.activate_account(
                         active_acc.id, client.session
                     )
-                except SessionExpiredError:
+                except SessionExpiredError as refresh_exc:
                     refreshed = None
+                    # 刷新后仍被重定向到登录页：页面判定优先于探活，直接记账。
+                    # 否则该账号会一直显示“当前激活”，每次请求都失败一遍。
+                    if runtime_state.rotator is not None:
+                        runtime_state.rotator.record_session_expired(
+                            active_acc.id, model=target_model
+                        )
+                    logger.error(
+                        "账号 %s 原地刷新仍处于登录页，标记登录态失效: %s",
+                        active_acc.id,
+                        refresh_exc,
+                    )
                 except Exception as refresh_exc:
                     logger.warning("会话原地刷新失败: %s", refresh_exc)
             if refreshed is not None:

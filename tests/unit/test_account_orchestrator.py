@@ -576,3 +576,56 @@ async def test_401_rescue_prefers_rotate_cookies_over_browser_repair(monkeypatch
         runtime_state.account_service = orig_service
         runtime_state.client = orig_client
         orchestrator._selfheal_at = orig_selfheal
+
+
+@pytest.mark.asyncio
+async def test_switch_target_login_redirect_marks_expired():
+    """切换目标被 Google 重定向到登录页：必须记账标记失效，不能把异常裸抛出去。
+
+    否则账号会一直显示“就绪/当前激活”，每次被选中都让请求失败一次，而前端
+    永远看不到任何失效状态——这正是用户反馈的“报错但不自动禁用”。
+    """
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.domain.errors import SessionExpiredError
+
+    mock_rotator = MagicMock(spec=AccountRotator)
+    mock_service = MagicMock(spec=AccountService)
+    mock_client = MagicMock(spec=AIStudioClient)
+    mock_client.session = MagicMock()
+
+    acc1 = AccountMeta(
+        id="acc_1", name="A", email="single@gmail.com", created_at="2026-01-01"
+    )
+    acc2 = AccountMeta(
+        id="acc_2", name="B", email="{{EMAIL_3dnmwpqr}}", created_at="2026-01-01"
+    )
+    mock_service.get_active_account = MagicMock(return_value=acc1)
+    mock_service.activate_account = AsyncMock(
+        side_effect=SessionExpiredError("Cookie 认证失败，重新注入并导航后仍处于登录页")
+    )
+    mock_rotator.get_next_account = AsyncMock(return_value=acc2)
+
+    orig_rotator = runtime_state.rotator
+    orig_service = runtime_state.account_service
+    orig_client = runtime_state.client
+    try:
+        runtime_state.rotator = mock_rotator
+        runtime_state.account_service = mock_service
+        runtime_state.client = mock_client
+
+        result = await try_switch_account(
+            model="gemini-3.8-flash",
+            failed_account_id="acc_1",
+            is_auth_error=True,
+            is_session_expired=True,
+        )
+        assert result is False
+        # 切换目标自己撞了登录页：必须被标记为登录态失效
+        mock_rotator.record_session_expired.assert_called_once_with(
+            "acc_2", model="gemini-3.8-flash"
+        )
+    finally:
+        runtime_state.rotator = orig_rotator
+        runtime_state.account_service = orig_service
+        runtime_state.client = orig_client
