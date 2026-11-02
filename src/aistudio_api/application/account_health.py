@@ -18,7 +18,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_EXT_BIN,
     DEFAULT_ORIGIN,
     DEFAULT_USER_AGENT,
-    ROLLING_COOKIE_NAMES,
+    SERVICE_SESSION_COOKIE_NAMES,
     apply_set_cookie_lines,
     calculate_sapisid_hash,
     parse_raw_cookies,
@@ -239,13 +239,13 @@ def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[st
         merged, changed = apply_set_cookie_lines(state, lines)
         if not changed:
             return []
-        # 标记“这份 auth.json 的滚动代次由服务端推进过”：推送合并时据此保护
-        # 这份代次不被另一台浏览器的旧代次顶回（见 routes_accounts）。
+        # 标记“这份 auth.json 的服务级会话票由服务端会话推进过”：推送合并时据此
+        # 保护这份代次不被另一台浏览器的旧代次顶回（见 routes_accounts）。
         #
-        # 只有变化的键真的命中滚动代次才置位。探活经常只回写 APISID 之类的
-        # 长寿凭据（滚动链没动），此时误打标记会让下一次推送的**新代次**被
-        # 保护逻辑挡在外面，服务端守着一份没推进的旧代次直到被判过期。
-        if any(name in ROLLING_COOKIE_NAMES for name in changed):
+        # 只认 PSIDTS/PSIDRTS/Olefcr 服务会话票的推进。SIDCC 系 Google 对任何
+        # 响应（包括未登录请求）都会重发，探活推进 SIDCC 不构成服务会话推进，
+        # 误打标记会把推送带来的新鲜会话票挡在外面，服务端守着旧代次直到过期。
+        if any(name in SERVICE_SESSION_COOKIE_NAMES for name in changed):
             merged["server_rotated"] = True
         atomic_write_json(target, merged)
     except Exception as exc:

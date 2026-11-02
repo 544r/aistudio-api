@@ -125,6 +125,27 @@ ROLLING_COOKIE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# 全局代次 Cookie：Google 对任何响应（包括未登录请求）都会重发，浏览器罐自己
+# 就能持有最新值。从磁盘把旧值灌回浏览器属于重放，上游直接 401——注入时
+# 永远跳过，缺失的由 Google 在导航时重新下发。
+GLOBAL_GENERATION_COOKIE_NAMES: frozenset[str] = frozenset(
+    {"SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC"}
+)
+
+# 服务级会话票：aistudio.google.com 凭它认登录态，缺失或过期会被直接弹回
+# accounts.google.com 登录页，且 Google 不会对"未建立服务会话"的浏览器补发。
+# 因此浏览器罐里没有时必须从 auth.json 注入（冷启动/换号/RotateCookies 抢救）；
+# 罐里已有实时代次时罐优先（热刷新不回滚）。这类票真被服务端会话推进过才打
+# server_rotated 标记——探活响应推进 SIDCC 不算服务会话推进。
+SERVICE_SESSION_COOKIE_NAMES: frozenset[str] = frozenset(
+    {
+        "__Secure-1PSIDTS",
+        "__Secure-3PSIDTS",
+        "__Secure-1PSIDRTS",
+        "__Secure-3PSIDRTS",
+    }
+)
+
 # accounts.google.com 的 host-only 会话根凭据。它们只在 accounts.google.com
 # 域名下可见，AI Studio 页面里的浏览器罐读不到；而 RotateCookies 抢救必须用到
 # 它们。浏览器回写 auth.json 时要显式保留，否则推送带进来的根凭据会在第一次

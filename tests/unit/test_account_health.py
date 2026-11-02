@@ -187,13 +187,19 @@ async def test_probe_persist_does_not_mark_server_rotated_for_long_lived_only(
 async def test_probe_persist_marks_server_rotated_when_generation_advances(
     tmp_path, monkeypatch
 ):
+    """只有服务级会话票（PSIDTS 系）推进才打 server_rotated 标记。
+
+    SIDCC 系 Google 对任何响应（包括未登录请求）都会重发，探活推进 SIDCC
+    不构成服务会话推进——误打标记会把推送带来的新鲜会话票挡在外面。
+    """
     monkeypatch.setattr(
         httpx,
         "AsyncClient",
         lambda *args, **kwargs: _FakeAsyncClient(
             200,
             set_cookies=[
-                "SIDCC=new-sidcc; Path=/; Domain=.google.com; Secure; HttpOnly"
+                "SIDCC=new-sidcc; Path=/; Domain=.google.com; Secure; HttpOnly",
+                "__Secure-3PSIDTS=new-ts; Path=/; Domain=.google.com; Secure; HttpOnly",
             ],
         ),
     )
@@ -206,6 +212,33 @@ async def test_probe_persist_marks_server_rotated_when_generation_advances(
 
     state = json.loads(auth_file.read_text(encoding="utf-8"))
     assert state["server_rotated"] is True
+
+
+@pytest.mark.asyncio
+async def test_probe_persist_does_not_mark_server_rotated_for_sidcc_only(
+    tmp_path, monkeypatch
+):
+    """探活只推进 SIDCC 系时不打 server_rotated：那不是服务会话推进。"""
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(
+            200,
+            set_cookies=[
+                "SIDCC=new-sidcc; Path=/; Domain=.google.com; Secure; HttpOnly",
+                "__Secure-1PSIDCC=new-cc; Path=/; Domain=.google.com; Secure; HttpOnly",
+            ],
+        ),
+    )
+    auth_file = _probe_auth_file(tmp_path)
+
+    await health.probe_account_session(
+        {"SID": "sid", "APISID": "old-apisid"},
+        persist_to=auth_file,
+    )
+
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert "server_rotated" not in state
 
 
 @pytest.mark.asyncio

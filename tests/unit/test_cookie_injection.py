@@ -64,7 +64,7 @@ async def test_default_injection_keeps_jar_rolling(tmp_path):
 
 @pytest.mark.asyncio
 async def test_clear_first_resets_jar_for_account_switch(tmp_path):
-    """换账号先清罐：旧账号滚动代次不得残留在罐或缓存里。"""
+    """换账号先清罐：旧账号 Cookie 不得残留，新账号服务会话票照常注入。"""
     auth = _auth_file(
         tmp_path,
         [
@@ -75,6 +75,12 @@ async def test_clear_first_resets_jar_for_account_switch(tmp_path):
                 "domain": ".google.com",
                 "path": "/",
             },
+            {
+                "name": "SIDCC",
+                "value": "disk-b-sidcc",
+                "domain": ".google.com",
+                "path": "/",
+            },
         ],
     )
     page = _page([{"name": "__Secure-3PSIDTS", "value": "jar-a-ts"}])
@@ -82,13 +88,14 @@ async def test_clear_first_resets_jar_for_account_switch(tmp_path):
     assert await load_cookies_to_page(page, auth, clear_first=True) is True
     page.cdp.send.assert_any_call("Network.clearBrowserCookies")
     injected = {c["name"]: c["value"] for c in page.set_cookies.await_args.args[0]}
-    assert injected == {"SAPISID": "sapi-b"}
+    # SIDCC 系永远不从磁盘注入；服务会话票随新账号注入
+    assert injected == {"SAPISID": "sapi-b", "__Secure-3PSIDTS": "disk-b-ts"}
     assert "__Secure-3PSIDTS" not in page._cached_cookies
 
 
 @pytest.mark.asyncio
 async def test_include_rolling_injects_fresh_generation(tmp_path):
-    """RotateCookies 抢救：磁盘刚推进的滚动代次必须进罐，且不回滚缓存。"""
+    """RotateCookies 抢救：磁盘刚推进的服务会话票必须覆盖罐里的旧值。"""
     auth = _auth_file(
         tmp_path,
         [
@@ -110,8 +117,42 @@ async def test_include_rolling_injects_fresh_generation(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cold_start_injects_service_session_ticket(tmp_path):
+    """回归：冷启动（空罐）必须注入 PSIDTS 服务会话票，否则被弹回登录页。
+
+    服务器实测（2026-11-02）：把 PSIDTS 一并跳过注入后，浏览器凭完整长寿命
+    Cookie 仍被 Google 弹回 accounts.google.com 登录页——服务会话票缺失时
+    Google 不会补发。SIDCC 系则必须继续跳过（重放敏感，Google 会重发）。
+    """
+    auth = _auth_file(
+        tmp_path,
+        [
+            {"name": "SID", "value": "sid", "domain": ".google.com", "path": "/"},
+            {
+                "name": "__Secure-3PSIDTS",
+                "value": "pushed-ts",
+                "domain": ".google.com",
+                "path": "/",
+            },
+            {
+                "name": "SIDCC",
+                "value": "pushed-sidcc",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ],
+    )
+    page = _page([])
+
+    assert await load_cookies_to_page(page, auth) is True
+    injected = {c["name"]: c["value"] for c in page.set_cookies.await_args.args[0]}
+    assert injected["__Secure-3PSIDTS"] == "pushed-ts"
+    assert "SIDCC" not in injected
+
+
+@pytest.mark.asyncio
 async def test_rolling_only_snapshot_is_noop_when_jar_has_live_values(tmp_path):
-    """auth.json 只剩滚动代次且罐里已有实时值：注入等价于空操作，会话仍可用。"""
+    """罐里已有实时代次时，只剩会话票的快照不覆盖罐（热刷新不回滚）。"""
     auth = _auth_file(
         tmp_path,
         [
@@ -127,23 +168,5 @@ async def test_rolling_only_snapshot_is_noop_when_jar_has_live_values(tmp_path):
 
     assert await load_cookies_to_page(page, auth) is True
     page.set_cookies.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_rolling_only_snapshot_fails_when_jar_empty(tmp_path):
-    """罐里没有任何实时凭据时，只剩滚动代次的快照救不了会话。"""
-    auth = _auth_file(
-        tmp_path,
-        [
-            {
-                "name": "__Secure-3PSIDTS",
-                "value": "disk-old-ts",
-                "domain": ".google.com",
-                "path": "/",
-            }
-        ],
-    )
-    page = _page([])
-
-    assert await load_cookies_to_page(page, auth) is False
-    page.set_cookies.assert_not_called()
+    # 注入等价于空操作时不会重建缓存视图，罐本来就是权威
+    assert "__Secure-3PSIDTS" not in page._cached_cookies

@@ -15,7 +15,8 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_API_KEY,
     DEFAULT_EXT_BIN,
     DEFAULT_USER_AGENT,
-    ROLLING_COOKIE_NAMES,
+    GLOBAL_GENERATION_COOKIE_NAMES,
+    SERVICE_SESSION_COOKIE_NAMES,
     normalize_benefit_tier,
     parse_benefit_tier_response,
 )
@@ -120,7 +121,11 @@ def get_aistudio_urls(
 
 # 注入时一律跳过的键：AI Studio 的站点级会话 ID 与浏览器上下文绑定，跨设备复用
 # 旧值反而容易被上游判成会话冲突，交给浏览器自己协商一个新的。
-_INJECTION_SKIPPED_COOKIE_NAMES = frozenset({"OSID", "__Secure-OSID"})
+# SIDCC 系全局代次同样永远跳过：Google 对任何响应都会重发它们，从磁盘回放旧值
+# 属于重放，上游直接 401。
+_INJECTION_SKIPPED_COOKIE_NAMES = (
+    frozenset({"OSID", "__Secure-OSID"}) | GLOBAL_GENERATION_COOKIE_NAMES
+)
 
 
 async def load_cookies_to_page(
@@ -132,31 +137,34 @@ async def load_cookies_to_page(
 ) -> bool:
     """Inject cookies from auth_file into the target page.
 
-    Cookie 所有权规则：滚动代次（SIDCC / *PSIDCC / *PSIDTS / *PSIDRTS /
-    `__Olefcr-*`）的权威来源是**浏览器罐**，auth.json 只是它的镜像——磁盘快照
-    最多落后一个轮换周期，把旧代次灌回浏览器等于主动向 Google 提交上一代凭据，
-    上游判重放直接 401。因此默认**不注入滚动代次**，缺失的由 Google 在导航时
-    重新下发；长寿命凭据（SID / PSID / APISID 系）照常覆盖。
+    Cookie 所有权分两层：
 
-    - 默认：不清罐、不注入滚动代次。适用于同账号热刷新（油猴推送、会话内重载、
-      登录页重注入）与冷启动加载本账号自己的 profile。
+    - SIDCC 系全局代次：权威来源永远是浏览器罐（Google 任何响应都重发），
+      注入永远跳过，磁盘旧值灌回去就是重放 → 401。
+    - PSIDTS/PSIDRTS/`__Olefcr-*` 服务级会话票：aistudio.google.com 凭它认
+      登录态，缺失即被弹回登录页且 Google 不会补发。默认从 auth.json 注入，
+      但罐里已有实时代次时罐优先（热刷新不回滚）；`include_rolling=True`
+      （仅 RotateCookies 抢救）强制用磁盘最新值覆盖。
+    - 长寿命凭据（SID / PSID / APISID 系）照常覆盖。
+
+    - 默认：不清罐。适用于同账号热刷新、冷启动加载本账号 profile、登录页重注入。
     - `clear_first=True`（换账号）：先清空罐与缓存再注入，防止上一个账号的
-      凭据残留；滚动代次同样不注入，交给导航重新协商。
+      凭据残留。
     - `include_rolling=True`（仅 RotateCookies 抢救）：auth.json 刚被
-      RotateCookies 响应推进到最新一代，此刻磁盘才是权威，把滚动代次一并灌入。
+      RotateCookies/推送推进到最新一代，此刻磁盘才是权威，强制覆盖服务级会话票。
     """
     if not auth_file or not Path(auth_file).is_file():
         return False
     page.account_auth_file = auth_file
     try:
-        live_rolling: dict[str, str] = {}
+        live_service_tokens: dict[str, str] = {}
         if not clear_first:
             with suppress(Exception):
-                live_rolling = {
+                live_service_tokens = {
                     str(item.get("name") or ""): str(item.get("value") or "")
                     for item in await page.get_cookies()
                     if isinstance(item, dict)
-                    and str(item.get("name") or "") in ROLLING_COOKIE_NAMES
+                    and str(item.get("name") or "") in SERVICE_SESSION_COOKIE_NAMES
                     and item.get("value")
                 }
         else:
@@ -171,33 +179,34 @@ async def load_cookies_to_page(
 
         skipped = _INJECTION_SKIPPED_COOKIE_NAMES
         if not include_rolling:
-            skipped = skipped | ROLLING_COOKIE_NAMES
+            # 罐里已有的服务级会话票以罐为准（热刷新不回滚代次）
+            skipped = skipped | set(live_service_tokens)
         cleaned_cookies = [
             c
             for c in cookies
             if isinstance(c, dict) and str(c.get("name") or "") not in skipped
         ]
         if not cleaned_cookies:
-            # 磁盘里只剩被跳过的键（滚动代次/OSID）：注入等价于空操作，
+            # 磁盘里只剩被跳过的键：注入等价于空操作，
             # 会话是否可用取决于罐里是否已有实时凭据
-            return bool(live_rolling)
+            return bool(live_service_tokens)
         await page.set_cookies(cleaned_cookies)
-        # set_cookies 会用本次注入列表重建 _cached_cookies；默认场景罐里还留着
-        # 本账号的实时滚动代次，补回缓存避免签名/探活读到残缺视图。
-        # include_rolling 时注入列表已带最新代次，绝不能再用注入前的旧值覆盖；
-        # 清罐场景 live_rolling 必为空，不会把上一个账号的代次带进缓存。
+        # set_cookies 会用本次注入列表重建 _cached_cookies；不清罐的场景罐里
+        # 还留着本账号的实时代次，补回缓存避免签名/探活读到残缺视图。
+        # include_rolling 时注入列表已带最新值，绝不能再用注入前的旧值覆盖；
+        # 清罐场景 live_service_tokens 必为空，不会把上一个账号的代次带进缓存。
         cached = getattr(page, "_cached_cookies", None)
         if isinstance(cached, dict) and not include_rolling:
-            cached.update(live_rolling)
+            cached.update(live_service_tokens)
         log.info(
-            "已向页面载入 %d 个 Cookie (auth_file=%s, 清罐=%s, 含滚动代次=%s, "
-            "保留罐内滚动 %d 项: %s)",
+            "已向页面载入 %d 个 Cookie (auth_file=%s, 清罐=%s, 含服务会话票=%s, "
+            "保留罐内实时代次 %d 项: %s)",
             len(cleaned_cookies),
             auth_file,
             clear_first,
             include_rolling,
-            len(live_rolling),
-            ", ".join(sorted(live_rolling)) or "-",
+            len(live_service_tokens),
+            ", ".join(sorted(live_service_tokens)) or "-",
         )
         return True
     except Exception as e:
@@ -461,15 +470,17 @@ async def save_browser_cookies(
                     }
         current_cookies = [item for item in current_cookies if isinstance(item, dict)]
         current_names = {str(item.get("name") or "") for item in current_cookies}
-        # AI Studio 页面的浏览器罐看不到 accounts.google.com 的 host-only 根凭据。
-        # 原样回写会让推送带进来的 LSID / __Host-*PLSID 在第一次自动保存后消失，
-        # RotateCookies 抢救随后永远缺少原料。这里从上一份 auth.json 里补回来；
-        # 已经过期或浏览器显式删除（空值/不在罐里）的不补。
+        # AI Studio 页面的浏览器罐看不到 accounts.google.com 的 host-only 根凭据
+        # （LSID / __Host-*PLSID，RotateCookies 抢救的原料），也拿不到服务级会话票
+        # （PSIDTS/PSIDRTS/Olefcr——会话被弹回登录页时罐里就是没有）。原样回写会让
+        # 推送带进来的这些凭据在第一次自动保存后消失。这里从上一份 auth.json 里
+        # 补回来；已经过期或浏览器显式删除（空值/不在罐里）的不补。
         now = time.time()
+        preserve_names = ACCOUNTS_ROOT_COOKIE_NAMES | SERVICE_SESSION_COOKIE_NAMES
         preserved_roots = [
             dict(item)
             for item in previous_cookies
-            if str(item.get("name") or "") in ACCOUNTS_ROOT_COOKIE_NAMES
+            if str(item.get("name") or "") in preserve_names
             and str(item.get("name") or "") not in current_names
             and item.get("value")
             and _cookie_is_unexpired(item, now)
@@ -477,26 +488,26 @@ async def save_browser_cookies(
         if preserved_roots:
             current_cookies = [*current_cookies, *preserved_roots]
             log.debug(
-                "浏览器保存保留 %d 个 accounts 根凭据: %s",
+                "浏览器保存保留 %d 个镜像凭据 (根凭据/服务会话票): %s",
                 len(preserved_roots),
                 ", ".join(str(item.get("name") or "") for item in preserved_roots),
             )
         # 浏览器落盘的滚动代次由服务端（浏览器会话本身）推进过：打上标记，
         # 推送合并时据此保护这份代次不被另一台浏览器的旧代次顶回。
         #
-        # 判据是「滚动代次在浏览器里确实出现了，而上一份 auth.json 里没有」。
-        # 每次导航都无条件置位会让标记恒真：推送带来的新代次永远进不来，服务端
-        # 守着旧代次直到被判过期。宁可少保护（推送接管）也不要把它变成单向锁。
-        rolling_names = ROLLING_COOKIE_NAMES
-        browser_rolling = {
+        # 判据是「服务级会话票在浏览器里确实出现了，而上一份 auth.json 里没有」。
+        # 只认 PSIDTS/PSIDRTS/Olefcr 这类服务会话票——SIDCC 系 Google 对任何响应
+        # （包括未登录请求）都会重发，探活/导航推进 SIDCC 不构成"服务端会话推进"，
+        # 误打标记会把推送带来的新鲜会话票挡在 auth.json 外面。
+        browser_service_tokens = {
             str(item.get("name") or "")
             for item in current_cookies
             if isinstance(item, dict)
-            and str(item.get("name") or "") in rolling_names
+            and str(item.get("name") or "") in SERVICE_SESSION_COOKIE_NAMES
             and item.get("value")
         }
         state: dict[str, object] = {"cookies": current_cookies, "origins": origins}
-        if browser_rolling - previous_names:
+        if browser_service_tokens - previous_names:
             state["server_rotated"] = True
         atomic_write_json(auth_path, state)
         if quiet:
