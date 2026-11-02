@@ -65,8 +65,9 @@ async def _try_rotate_cookies_repair(account_id: str) -> bool:
         return False
 
     # RotateCookies 只改了 auth.json。当前账号若正在使用，浏览器罐里仍是旧代次，
-    # 重试会原样再撞一次 401；必须把新代次灌回页面（此时 auth.json 就是最新值，
-    # 用 preserve_rolling=False 整罐重灌）。
+    # 重试会原样再撞一次 401；必须把新代次灌进页面。这是全项目唯一允许从磁盘
+    # 注入滚动代次的入口（include_rolling=True）：此刻 auth.json 刚被 RotateCookies
+    # 响应推进到最新一代，磁盘才是权威。
     rotator = runtime_state.rotator
     if rotator is not None:
         rotator.set_session_expired(account_id, False)
@@ -79,9 +80,7 @@ async def _try_rotate_cookies_repair(account_id: str) -> bool:
         and active.id == account_id
         and session.is_ready
     ):
-        reloaded = await session.reload_current_account_cookies(
-            preserve_rolling=False
-        )
+        reloaded = await session.reload_current_account_cookies(include_rolling=True)
         if not reloaded:
             logger.warning(
                 "账号 %s RotateCookies 成功，但新代次未能灌回浏览器，交给后续抢救链",

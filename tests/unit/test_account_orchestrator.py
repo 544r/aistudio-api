@@ -670,7 +670,7 @@ async def test_rotate_cookies_rescue_reloads_active_browser(monkeypatch):
         assert await orchestrator._try_rotate_cookies_repair("acc_1") is True
         mock_rotator.set_session_expired.assert_called_once_with("acc_1", False)
         mock_session.reload_current_account_cookies.assert_awaited_once_with(
-            preserve_rolling=False
+            include_rolling=True
         )
     finally:
         runtime_state.rotator = orig_rotator

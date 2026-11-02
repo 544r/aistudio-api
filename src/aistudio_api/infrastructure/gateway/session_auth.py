@@ -120,32 +120,37 @@ def get_aistudio_urls(
 
 # 注入时一律跳过的键：AI Studio 的站点级会话 ID 与浏览器上下文绑定，跨设备复用
 # 旧值反而容易被上游判成会话冲突，交给浏览器自己协商一个新的。
-# 注意 SIDCC / *PSIDCC 不在此列——它们属于 Google 全域会话链路，丢掉就等于把
-# 轮换起点交给一次未知的重新协商，见 cookie_parser.ROLLING_COOKIE_NAMES。
 _INJECTION_SKIPPED_COOKIE_NAMES = frozenset({"OSID", "__Secure-OSID"})
 
 
 async def load_cookies_to_page(
-    page: CDPPage, auth_file: str | None, *, preserve_rolling: bool = False
+    page: CDPPage,
+    auth_file: str | None,
+    *,
+    clear_first: bool = False,
+    include_rolling: bool = False,
 ) -> bool:
     """Inject cookies from auth_file into the target page.
 
-    `preserve_rolling=True` 用于**同一账号**的热刷新（油猴推送覆盖、会话内重载）：
-    既不清空浏览器 Cookie 罐，也不覆盖罐里已有的滚动代次（`*PSIDTS` /
-    `*PSIDRTS` / `SIDCC` / `*PSIDCC`）。磁盘快照最多可能落后一个轮换周期，把旧
-    代次灌回正在工作的会话，等于主动向 Google 提交上一代凭据——上游判定重放后
-    返回 401，账号就被标记成“登录态失效”。长寿命凭据（SID / PSID / APISID 系）
-    仍照常覆盖，推送刷新登录根的目的不受影响。
+    Cookie 所有权规则：滚动代次（SIDCC / *PSIDCC / *PSIDTS / *PSIDRTS /
+    `__Olefcr-*`）的权威来源是**浏览器罐**，auth.json 只是它的镜像——磁盘快照
+    最多落后一个轮换周期，把旧代次灌回浏览器等于主动向 Google 提交上一代凭据，
+    上游判重放直接 401。因此默认**不注入滚动代次**，缺失的由 Google 在导航时
+    重新下发；长寿命凭据（SID / PSID / APISID 系）照常覆盖。
 
-    换账号时必须走默认的 `preserve_rolling=False`：那是要整个罐子换掉，
-    否则会残留上一个账号的代次。
+    - 默认：不清罐、不注入滚动代次。适用于同账号热刷新（油猴推送、会话内重载、
+      登录页重注入）与冷启动加载本账号自己的 profile。
+    - `clear_first=True`（换账号）：先清空罐与缓存再注入，防止上一个账号的
+      凭据残留；滚动代次同样不注入，交给导航重新协商。
+    - `include_rolling=True`（仅 RotateCookies 抢救）：auth.json 刚被
+      RotateCookies 响应推进到最新一代，此刻磁盘才是权威，把滚动代次一并灌入。
     """
     if not auth_file or not Path(auth_file).is_file():
         return False
     page.account_auth_file = auth_file
     try:
         live_rolling: dict[str, str] = {}
-        if preserve_rolling:
+        if not clear_first:
             with suppress(Exception):
                 live_rolling = {
                     str(item.get("name") or ""): str(item.get("value") or "")
@@ -164,26 +169,33 @@ async def load_cookies_to_page(
         if not cookies:
             return False
 
+        skipped = _INJECTION_SKIPPED_COOKIE_NAMES
+        if not include_rolling:
+            skipped = skipped | ROLLING_COOKIE_NAMES
         cleaned_cookies = [
             c
             for c in cookies
-            if isinstance(c, dict)
-            and str(c.get("name") or "") not in _INJECTION_SKIPPED_COOKIE_NAMES
-            and str(c.get("name") or "") not in live_rolling
+            if isinstance(c, dict) and str(c.get("name") or "") not in skipped
         ]
         if not cleaned_cookies:
-            # 磁盘里只剩被罐内实时值保护的滚动代次：注入等价于空操作，会话仍然可用
+            # 磁盘里只剩被跳过的键（滚动代次/OSID）：注入等价于空操作，
+            # 会话是否可用取决于罐里是否已有实时凭据
             return bool(live_rolling)
         await page.set_cookies(cleaned_cookies)
-        # set_cookies 会用本次注入列表重建 _cached_cookies，把被保护的实时
-        # 代次补回去，避免签名计算读到残缺的 Cookie 视图
+        # set_cookies 会用本次注入列表重建 _cached_cookies；默认场景罐里还留着
+        # 本账号的实时滚动代次，补回缓存避免签名/探活读到残缺视图。
+        # include_rolling 时注入列表已带最新代次，绝不能再用注入前的旧值覆盖；
+        # 清罐场景 live_rolling 必为空，不会把上一个账号的代次带进缓存。
         cached = getattr(page, "_cached_cookies", None)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and not include_rolling:
             cached.update(live_rolling)
         log.info(
-            "已向页面载入 %d 个 Cookie (auth_file=%s, 保留实时滚动代次 %d 项: %s)",
+            "已向页面载入 %d 个 Cookie (auth_file=%s, 清罐=%s, 含滚动代次=%s, "
+            "保留罐内滚动 %d 项: %s)",
             len(cleaned_cookies),
             auth_file,
+            clear_first,
+            include_rolling,
             len(live_rolling),
             ", ".join(sorted(live_rolling)) or "-",
         )
@@ -580,9 +592,7 @@ async def navigate_to_aistudio(
                 )
                 # 登录页重注入不清空浏览器罐：罐里的滚动代次可能比 auth.json 快照
                 # 新，清罐重灌等于把旧代次再交一遍，Google 会直接判会话异常。
-                if not await load_cookies_to_page(
-                    page, auth_file, preserve_rolling=True
-                ):
+                if not await load_cookies_to_page(page, auth_file):
                     raise SessionExpiredError(
                         f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
                     )

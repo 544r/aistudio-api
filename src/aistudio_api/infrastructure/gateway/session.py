@@ -106,6 +106,10 @@ class BrowserSession:
         self._auth_user: str | None = None
         self._tier: str | None = None
         self._profile_dir = derive_profile_dir(self._auth_file)
+        # 浏览器进程实际启动时使用的账号 auth 文件。用于区分“冷启动加载本账号”
+        # 与“复用旧浏览器进程加载另一个账号”——前者罐里就是本账号的代次链，
+        # 不能清空回滚；后者必须清罐防串号。
+        self._browser_profile_auth_file: str | None = None
         self._proc: ChromiumProcess | None = None
         self._cdp_client: CDPClient | None = None
 
@@ -290,17 +294,19 @@ class BrowserSession:
                 else:
                     new_page = await self._cdp_client.connect_page(block_assets=True)
 
-                # 同一账号原地刷新（会话保活 / 401 自愈）时不能清空 Cookie 罐：
-                # 罐里的滚动代次永远不比 auth.json 快照旧，清空再灌回就是主动回滚
-                # 代次，Google 会把它当成重放并返回 401。
-                same_account = bool(
-                    old_context is not None
-                    and old_context.auth_file
-                    and old_context.auth_file == auth_file
-                )
-                await load_cookies_to_page(
-                    new_page, auth_file, preserve_rolling=same_account
-                )
+                # Cookie 所有权：滚动代次以浏览器罐为准，auth.json 只是镜像。
+                # 只有换账号才清罐（防串号）；冷启动时若浏览器就是为本账号启动的，
+                # 罐里的代次链不比快照旧，清空再灌回等于主动回滚代次触发 401。
+                if old_context is not None:
+                    clear_first = bool(
+                        old_context.auth_file and old_context.auth_file != auth_file
+                    )
+                else:
+                    clear_first = (
+                        self._browser_profile_auth_file is not None
+                        and self._browser_profile_auth_file != auth_file
+                    )
+                await load_cookies_to_page(new_page, auth_file, clear_first=clear_first)
                 await navigate_to_aistudio(
                     new_page,
                     auth_user=target_auth_user,
@@ -308,9 +314,7 @@ class BrowserSession:
                 )
 
                 async def _reload_cb(page: CDPPage) -> bool:
-                    return await load_cookies_to_page(
-                        page, auth_file, preserve_rolling=True
-                    )
+                    return await load_cookies_to_page(page, auth_file)
 
                 snap_key, base_template = await bootstrap_botguard_and_template(
                     new_page,
@@ -599,6 +603,9 @@ class BrowserSession:
         if not target_auth:
             return len(pw_cookies)
 
+        # 推送/导入是“种子”场景：推送方（用户正在使用的浏览器）是最新代次的
+        # 持有者，此处原样全量注入（含滚动代次），不经过 load_cookies_to_page
+        # 的“不注入滚动”规则——那条规则只约束 auth.json 镜像的回放。
         await self._ensure_browser_cdp()
         assert self._cdp_client is not None
         page = await self._cdp_client.create_new_page(block_assets=False)
@@ -631,21 +638,21 @@ class BrowserSession:
         self,
         page: CDPPage | None = None,
         *,
-        preserve_rolling: bool = True,
+        include_rolling: bool = False,
     ) -> bool:
         """热刷新当前账号的 Cookie（油猴推送覆盖走这里）。
 
-        默认只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——推送来自另一台
-        浏览器，它那份代次可能已经比服务端落后一到几轮。
+        默认只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——罐才是代次链
+        的权威，auth.json 镜像不允许回滚它。
 
-        `preserve_rolling=False` 用于 RotateCookies 抢救：auth.json 刚被服务端
-        换成了新一代滚动代次，必须整罐重灌，重试才会真的带上新代次。
+        `include_rolling=True` 仅用于 RotateCookies 抢救：auth.json 刚被
+        RotateCookies 响应推进到最新一代，此刻磁盘才是权威，把滚动代次一并灌入。
         """
         target = page or (self.active_context.page if self.active_context else None)
         return bool(
             target
             and await load_cookies_to_page(
-                target, self._auth_file, preserve_rolling=preserve_rolling
+                target, self._auth_file, include_rolling=include_rolling
             )
         )
 
@@ -831,6 +838,7 @@ class BrowserSession:
             user_data_dir=profile_dir,
             headless=settings.browser_headless,
         )
+        self._browser_profile_auth_file = self._auth_file
 
         self._cdp_client = CDPClient(port=self.port)
         await self._cdp_client.wait_until_ready()
