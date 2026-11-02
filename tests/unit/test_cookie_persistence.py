@@ -92,3 +92,65 @@ async def test_save_cookies_skips_missing_account_directory(tmp_path):
     ) as save:
         assert not await session._save_cookies(page=page, auth_file=str(auth_file))
         save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_browser_cookies_marks_rotated_only_for_new_rolling(tmp_path):
+    """浏览器落盘：只有 auth.json 里没有的滚动代次出现时才打 server_rotated。
+
+    每次导航都无条件置位会让标记恒真，推送带来的新代次永远被挡在门外。
+    """
+    import json
+
+    from aistudio_api.infrastructure.gateway.session_auth import (
+        save_browser_cookies,
+    )
+
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "SIDCC",
+                        "value": "old-sidcc",
+                        "domain": ".google.com",
+                        "path": "/",
+                    }
+                ],
+                "origins": [],
+                "server_rotated": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    page = _page_with_cookies(
+        [
+            {"name": "SAPISID", "value": "sapi", "domain": ".google.com", "path": "/"},
+            {
+                "name": "SIDCC",
+                "value": "same-sidcc",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ]
+    )
+
+    assert await save_browser_cookies(page, str(auth_file))
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert "server_rotated" not in state
+
+    page = _page_with_cookies(
+        [
+            {"name": "SAPISID", "value": "sapi", "domain": ".google.com", "path": "/"},
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "new-ts",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ]
+    )
+    assert await save_browser_cookies(page, str(auth_file))
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert state["server_rotated"] is True

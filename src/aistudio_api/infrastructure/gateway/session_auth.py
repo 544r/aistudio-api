@@ -424,16 +424,36 @@ async def save_browser_cookies(
             return False
         auth_path = Path(auth_file)
         origins = []
+        previous_names: set[str] = set()
         if auth_path.exists():
             with suppress(Exception):
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
+                previous = existing.get("cookies")
+                if isinstance(previous, list):
+                    previous_names = {
+                        str(item.get("name") or "")
+                        for item in previous
+                        if isinstance(item, dict)
+                    }
         # 浏览器落盘的滚动代次由服务端（浏览器会话本身）推进过：打上标记，
         # 推送合并时据此保护这份代次不被另一台浏览器的旧代次顶回。
-        atomic_write_json(
-            auth_path,
-            {"cookies": current_cookies, "origins": origins, "server_rotated": True},
-        )
+        #
+        # 判据是「滚动代次在浏览器里确实出现了，而上一份 auth.json 里没有」。
+        # 每次导航都无条件置位会让标记恒真：推送带来的新代次永远进不来，服务端
+        # 守着旧代次直到被判过期。宁可少保护（推送接管）也不要把它变成单向锁。
+        rolling_names = ROLLING_COOKIE_NAMES
+        browser_rolling = {
+            str(item.get("name") or "")
+            for item in current_cookies
+            if isinstance(item, dict)
+            and str(item.get("name") or "") in rolling_names
+            and item.get("value")
+        }
+        state: dict[str, object] = {"cookies": current_cookies, "origins": origins}
+        if browser_rolling - previous_names:
+            state["server_rotated"] = True
+        atomic_write_json(auth_path, state)
         if quiet:
             log.debug("已保存 %d 个 Cookie 至 %s", len(current_cookies), auth_file)
         else:

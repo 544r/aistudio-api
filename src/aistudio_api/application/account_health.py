@@ -18,6 +18,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     DEFAULT_EXT_BIN,
     DEFAULT_ORIGIN,
     DEFAULT_USER_AGENT,
+    ROLLING_COOKIE_NAMES,
     apply_set_cookie_lines,
     calculate_sapisid_hash,
     parse_raw_cookies,
@@ -240,7 +241,12 @@ def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[st
             return []
         # 标记“这份 auth.json 的滚动代次由服务端推进过”：推送合并时据此保护
         # 这份代次不被另一台浏览器的旧代次顶回（见 routes_accounts）。
-        merged["server_rotated"] = True
+        #
+        # 只有变化的键真的命中滚动代次才置位。探活经常只回写 APISID 之类的
+        # 长寿凭据（滚动链没动），此时误打标记会让下一次推送的**新代次**被
+        # 保护逻辑挡在外面，服务端守着一份没推进的旧代次直到被判过期。
+        if any(name in ROLLING_COOKIE_NAMES for name in changed):
+            merged["server_rotated"] = True
         atomic_write_json(target, merged)
     except Exception as exc:
         logger.debug("回写探活轮换 Cookie 失败 (%s): %s", target, exc)

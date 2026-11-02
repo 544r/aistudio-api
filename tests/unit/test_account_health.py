@@ -54,16 +54,23 @@ def test_account_stats_session_expired_toggle():
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, set_cookies: list[str] | None = None) -> None:
         self.status_code = status_code
+        self.headers = httpx.Headers(
+            [("set-cookie", line) for line in (set_cookies or [])]
+        )
 
 
 class _FakeAsyncClient:
     def __init__(
-        self, status_code: int | None = None, exc: Exception | None = None
+        self,
+        status_code: int | None = None,
+        exc: Exception | None = None,
+        set_cookies: list[str] | None = None,
     ) -> None:
         self._status_code = status_code
         self._exc = exc
+        self._set_cookies = set_cookies
 
     async def __aenter__(self) -> _FakeAsyncClient:
         return self
@@ -75,7 +82,7 @@ class _FakeAsyncClient:
         if self._exc is not None:
             raise self._exc
         assert self._status_code is not None
-        return _FakeResponse(self._status_code)
+        return _FakeResponse(self._status_code, self._set_cookies)
 
 
 @pytest.mark.asyncio
@@ -108,6 +115,97 @@ async def test_probe_account_session_handles_network_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_probe_account_session_rejects_empty_cookies():
     assert await probe_account_session({}) is False
+
+
+def _probe_auth_file(tmp_path: Path) -> Path:
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "SID",
+                        "value": "sid",
+                        "domain": ".google.com",
+                        "path": "/",
+                    },
+                    {
+                        "name": "APISID",
+                        "value": "old-apisid",
+                        "domain": ".google.com",
+                        "path": "/",
+                    },
+                    {
+                        "name": "__Secure-1PSIDTS",
+                        "value": "old-ts",
+                        "domain": ".google.com",
+                        "path": "/",
+                    },
+                ],
+                "origins": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return auth_file
+
+
+@pytest.mark.asyncio
+async def test_probe_persist_does_not_mark_server_rotated_for_long_lived_only(
+    tmp_path, monkeypatch
+):
+    """探活只回写 APISID（长寿凭据）时，不能误判“服务端推进过滚动代次”。
+
+    误置位会让下一次推送带来的新代次被保护逻辑挡住，服务端守着没推进的旧
+    代次直到被判过期。
+    """
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(
+            200,
+            set_cookies=["APISID=new-apisid; Path=/; Domain=.google.com; Secure"],
+        ),
+    )
+    auth_file = _probe_auth_file(tmp_path)
+
+    assert (
+        await health.probe_account_session(
+            {"SID": "sid", "APISID": "old-apisid"},
+            persist_to=auth_file,
+        )
+        is True
+    )
+
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    by_name = {c["name"]: c["value"] for c in state["cookies"]}
+    assert by_name["APISID"] == "new-apisid"
+    assert "server_rotated" not in state
+
+
+@pytest.mark.asyncio
+async def test_probe_persist_marks_server_rotated_when_generation_advances(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: _FakeAsyncClient(
+            200,
+            set_cookies=[
+                "SIDCC=new-sidcc; Path=/; Domain=.google.com; Secure; HttpOnly"
+            ],
+        ),
+    )
+    auth_file = _probe_auth_file(tmp_path)
+
+    await health.probe_account_session(
+        {"SID": "sid", "APISID": "old-apisid"},
+        persist_to=auth_file,
+    )
+
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert state["server_rotated"] is True
 
 
 @pytest.mark.asyncio
