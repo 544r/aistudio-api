@@ -979,7 +979,7 @@ async def activate_account(
     if runtime_state.rotator:
         runtime_state.rotator.add_account(account.id)
         runtime_state.rotator.clear_cooldown(account.id)
-    log.info("手动激活账号: %s (%s)", account.id, account.name)
+    log.info("激活账号: id=%s, name=%s", account.id, account.name)
     return to_account_response(account)
 
 
@@ -1082,7 +1082,7 @@ async def detect_account_email(
 
     if detected_tier:
         account_service.update_account_tier(account_id, detected_tier)
-        log.info("已自动识别并更新账号 %s 订阅等级: %s", account_id, detected_tier)
+        log.info("已更新账号订阅等级: id=%s, tier=%s", account_id, detected_tier)
 
     acc = account_service.get_account(account_id)
     if not acc:
@@ -1138,7 +1138,7 @@ async def detect_account_tier(
 
     if detected_tier:
         account_service.update_account_tier(account_id, detected_tier)
-        log.info("已更新账号 %s 订阅等级: %s", account_id, detected_tier)
+        log.info("已更新账号订阅等级: id=%s, tier=%s", account_id, detected_tier)
 
     acc = account_service.get_account(account_id)
     if not acc:
@@ -1252,7 +1252,7 @@ async def delete_account(
             if browser_session is not None:
                 await browser_session.reset_session()
 
-    log.info("已删除账号: %s", account_id)
+    log.info("已删除账号: id=%s", account_id)
     return {"ok": True}
 
 
@@ -1279,7 +1279,7 @@ async def delete_cookie_group(
                 deleted_count += 1
                 if rotator:
                     rotator.remove_account(a.id)
-                log.info("已删除组 %s 下的子账号 %s", cookie_id, a.id)
+                log.info("已删除子账号: cookie_id=%s, id=%s", cookie_id, a.id)
 
     if active_deleted:
         remaining_accounts = account_service.list_accounts()
@@ -1311,7 +1311,7 @@ async def update_account(
     account = account_service.update_account(account_id, req.name)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
-    log.info("账号已更新: %s -> %s", account.id, req.name)
+    log.info("账号名称已更新: id=%s, name=%s", account.id, req.name)
     return to_account_response(account)
 
 
@@ -1333,11 +1333,7 @@ async def toggle_account(
 
         await try_switch_account(failed_account_id=account_id)
 
-    log.info(
-        "账号使能状态已切换: %s -> %s",
-        account.id,
-        "启用" if account.enabled else "停用",
-    )
+    log.info("账号状态已切换: id=%s, enabled=%s", account.id, account.enabled)
     return to_account_response(account)
 
 
@@ -1351,7 +1347,7 @@ async def update_account_group(
     account = account_service.update_account_group(account_id, req.group)
     if account is None:
         raise HTTPException(status_code=404, detail="账号不存在")
-    log.info("账号分组已更新: %s -> %s", account.id, account.group)
+    log.info("账号分组已更新: id=%s, group=%s", account.id, account.group)
     return to_account_response(account)
 
 
@@ -1434,7 +1430,7 @@ async def create_snapshot_preset(
 ) -> PresetResponse:
     """将当前所有启用账号一键快照保存为新预设方案。"""
     saved = account_service.create_snapshot_preset(req.name, req.description)
-    log.info("已创建账号快照方案: %s (id=%s)", saved.name, saved.id)
+    log.info("已创建预设快照: name=%s, id=%s", saved.name, saved.id)
     return PresetResponse.model_validate(saved.to_dict())
 
 
@@ -1473,7 +1469,7 @@ async def apply_preset(
             await try_switch_account()
 
         log.info(
-            "已应用预设方案 '%s': 启用 %d 个, 停用 %d 个",
+            "已应用预设: name=%s, 启用=%d, 停用=%d",
             preset.name,
             len(en_ids),
             len(dis_ids),
@@ -1573,7 +1569,7 @@ async def import_cookies(
                 req.cookies,
                 auth_file=str(auth_path) if auth_path else None,
             )
-            log.info("已注入 %d 个 Cookie 并为 %s 保存 auth.json", count, account.name)
+            log.info("已导入 Cookie 并保存文件: 数量=%d, 账号=%s", count, account.name)
     except Exception as e:
         log.warning("为 %s 注入浏览器 Cookie 失败: %s", account.name, e)
     return ImportCookiesResponse(
@@ -1592,7 +1588,7 @@ async def probe_and_import(
     account_service: AccountService = Depends(get_account_service),
     runtime_state: RuntimeState = Depends(get_runtime_state),
 ) -> ProbeAndImportResponse:
-    """单份 Cookie 无限向下探活多账号并一键批量导入。"""
+    """探测 Cookie 中的多个已登录账号并批量导入。"""
     from aistudio_api.infrastructure.account.cookie_parser import (
         parse_cookie_string,
         probe_google_accounts_infinite,
@@ -1641,7 +1637,7 @@ async def probe_and_import(
         browser_session = client_obj._session
         if browser_session is not None:
             await account_service.activate_account(metas[0].id, browser_session)
-    log.info("探活与导入完成: 成功导入 %d 个账号", len(imported_accounts))
+    log.info("Cookie 探活完成: 导入账号数=%d", len(imported_accounts))
     return ProbeAndImportResponse(
         imported_count=len(imported_accounts),
         accounts=imported_accounts,
@@ -1776,7 +1772,7 @@ async def import_bundle(
         imported_accounts.append(to_account_response(account))
     if not account_service.get_active_account() and imported_accounts:
         account_service.set_active_account(imported_accounts[0].id)
-    log.info("批量文件导入完成: 成功入库 %d 个账号", len(imported_accounts))
+    log.info("批量导入完成: 导入账号数=%d", len(imported_accounts))
     return ImportBundleResponse(
         imported_count=len(imported_accounts),
         accounts=imported_accounts,

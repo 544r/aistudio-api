@@ -126,8 +126,12 @@ class ModelProfile:
         )
 
 
-def _normalize_model_name(model: str) -> str:
-    return model.removeprefix("models/").lower()
+def normalize_model_name(model: str) -> str:
+    """Normalize model string (strip, lowercase, remove 'models/' prefix)."""
+    return model.strip().removeprefix("models/").lower()
+
+
+_normalize_model_name = normalize_model_name
 
 
 def _coerce_thinking_level(value: object) -> ThinkingLevel:
@@ -668,81 +672,6 @@ def update_configured_logging_settings(
     return logging_dict
 
 
-# ─── 请求超时（运行时可改，落盘到 config.yaml 的 timeouts 段） ───
-_TIMEOUT_MIN_S = 5
-_TIMEOUT_MAX_S = 86400
-
-
-def _clamp_timeout_seconds(value: object) -> int | None:
-    try:
-        seconds = int(str(value))
-    except (TypeError, ValueError):
-        return None
-    return max(_TIMEOUT_MIN_S, min(_TIMEOUT_MAX_S, seconds))
-
-
-def get_configured_timeouts(
-    config_path: str | os.PathLike[str] | None = None,
-) -> dict[str, int]:
-    """读取 config.yaml 中 timeouts 段的超时覆盖值。"""
-    config = _load_yaml_config(_resolve_config_path(config_path))
-    raw = config.get("timeouts")
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[str, int] = {}
-    stream = _clamp_timeout_seconds(raw.get("stream"))
-    replay = _clamp_timeout_seconds(raw.get("replay"))
-    if stream is not None:
-        result["stream"] = stream
-    if replay is not None:
-        result["replay"] = replay
-    return result
-
-
-def apply_configured_timeouts(
-    config_path: str | os.PathLike[str] | None = None,
-) -> dict[str, int]:
-    """把 config.yaml 里的超时覆盖应用到运行时 settings（启动时调用）。"""
-    from aistudio_api.config import settings
-
-    overrides = get_configured_timeouts(config_path)
-    if "stream" in overrides:
-        settings.timeout_stream = overrides["stream"]
-    if "replay" in overrides:
-        settings.timeout_replay = overrides["replay"]
-    return overrides
-
-
-def update_configured_timeouts(
-    stream: int | None = None,
-    replay: int | None = None,
-    config_path: str | os.PathLike[str] | None = None,
-) -> dict[str, int]:
-    """更新 config.yaml 中的 timeouts 段并刷新缓存。"""
-    resolved_path = _resolve_config_path(config_path)
-    content = (
-        resolved_path.read_text(encoding="utf-8") if resolved_path.exists() else ""
-    )
-    parsed = yaml.safe_load(content) or {}
-    if not isinstance(parsed, dict):
-        parsed = {}
-
-    raw_timeouts = parsed.get("timeouts")
-    timeouts = dict(raw_timeouts) if isinstance(raw_timeouts, dict) else {}
-    if stream is not None:
-        timeouts["stream"] = _clamp_timeout_seconds(stream)
-    if replay is not None:
-        timeouts["replay"] = _clamp_timeout_seconds(replay)
-
-    parsed["timeouts"] = timeouts
-    resolved_path.write_text(
-        yaml.dump(parsed, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-    invalidate_config_cache()
-    return {k: int(v) for k, v in timeouts.items() if isinstance(v, int)}
-
-
 # ─── 订阅层级每日软额度 (Tier Quotas) 与预设方案 (Presets) ───
 def get_configured_tier_quotas(
     config_path: str | os.PathLike[str] | None = None,
@@ -874,4 +803,3 @@ def get_configured_paid_model_rules(
     if isinstance(def_rules, dict):
         return def_rules
     return {}
-    return raw_rules

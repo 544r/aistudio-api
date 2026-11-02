@@ -4,8 +4,6 @@ export interface SystemConfig {
   browser_headless: boolean
   proxy_configured: boolean
   auth_enabled: boolean
-  timeout_stream: number
-  timeout_replay: number
   yaml_content: string
   log_level?: string
   dump_requests?: boolean
@@ -14,17 +12,6 @@ export interface SystemConfig {
   dump_dir?: string
 }
 
-export interface UpdateTimeoutsRequest {
-  stream?: number
-  replay?: number
-}
-
-export interface UpdateTimeoutsResponse {
-  ok: boolean
-  persisted: boolean
-  timeout_stream: number
-  timeout_replay: number
-}
 export interface UpdateLoggingConfigRequest {
   level?: string
   dump_requests?: boolean

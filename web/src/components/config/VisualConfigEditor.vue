@@ -195,7 +195,7 @@ function updateGlobalDropUnsupported(val: boolean) {
 
 function handleResetDefaults() {
   if (confirm('确定要将所有模型规则重置为官方推荐默认预设吗？')) {
-    const doc: ParsedConfigYaml = {
+    const nextDoc: ParsedConfigYaml = {
       ...parsedConfig.value,
       model_defaults: {
         drop_unsupported_params: false,
@@ -203,7 +203,7 @@ function handleResetDefaults() {
           {
             name: 'image_models',
             match: {
-              contains: ['image'],
+              contains: ['image', 'imagen'],
             },
             is_image_model: true,
             default_tools: ['google_search_and_image_search'],
@@ -216,6 +216,14 @@ function handleResetDefaults() {
               },
             },
             clear_generation_config_indexes: [7, 13, 17],
+            disable_safety_settings: true,
+          },
+          {
+            name: 'video_models',
+            match: {
+              prefixes: ['veo-'],
+              contains: ['veo'],
+            },
             disable_safety_settings: true,
           },
           {
@@ -249,9 +257,9 @@ function handleResetDefaults() {
         models: {},
       },
     }
-    parsedConfig.value = doc
+    parsedConfig.value = nextDoc
     syncStateToYaml()
-    toast.info('已载入默认规则（保留现有 API Key 与日志配置），请点击右上角保存并生效')
+    toast.info('已载入默认模型规则（保留现有 API Key、调度器与配额配置），请点击右上角保存并生效')
   }
 }
 

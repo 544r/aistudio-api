@@ -9,8 +9,6 @@ import type {
   UpdateApiKeyRequest,
   UpdateLoggingConfigRequest,
   UpdateLoggingConfigResponse,
-  UpdateTimeoutsRequest,
-  UpdateTimeoutsResponse,
   HealthCheckResponse,
   LogsResponse,
   DumpFilesResponse,
@@ -62,13 +60,6 @@ export const systemApi = {
 
   updateLoggingConfig(req: UpdateLoggingConfigRequest): Promise<UpdateLoggingConfigResponse> {
     return request<UpdateLoggingConfigResponse>('/config/logging', {
-      method: 'PUT',
-      body: JSON.stringify(req),
-    })
-  },
-
-  updateTimeouts(req: UpdateTimeoutsRequest): Promise<UpdateTimeoutsResponse> {
-    return request<UpdateTimeoutsResponse>('/config/timeouts', {
       method: 'PUT',
       body: JSON.stringify(req),
     })

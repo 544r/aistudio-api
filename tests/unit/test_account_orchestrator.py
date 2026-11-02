@@ -185,7 +185,6 @@ async def test_try_switch_account_single_account_recovery():
         recovered = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
         )
         assert recovered is True
         mock_client.clear_templates.assert_called_once()
@@ -237,7 +236,6 @@ async def test_try_switch_account_401_repairs_session_in_place_before_giving_up(
         result = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
             is_session_expired=True,
         )
         assert result is True
@@ -293,7 +291,6 @@ async def test_try_switch_account_session_expired_strictly_forbids_in_place_retr
         result = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
             is_session_expired=True,
         )
         # 严禁原地重试，必须返回 False
@@ -343,7 +340,6 @@ async def test_try_switch_account_session_expired_switches_to_healthy_account():
         result = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
             is_session_expired=True,
         )
         assert result is True
@@ -351,7 +347,7 @@ async def test_try_switch_account_session_expired_switches_to_healthy_account():
         # （同批导入的账号经常一起到龄，误拉黑 24 小时会级联清空账号池）
         mock_rotator.record_session_expired.assert_not_called()
         mock_rotator.record_auth_error.assert_called_once_with(
-            "acc_1", model="gemini-3.8-flash"
+            "acc_1", model="gemini-3.8-flash", cooldown_seconds=300.0
         )
         # 成功激活 acc_2
         mock_service.activate_account.assert_called_once_with(
@@ -403,6 +399,7 @@ def test_account_stats_short_cooldown_sync():
     assert not stats.is_available("gemini-2.5-flash")
     rem3 = stats.get_cooldown_remaining("gemini-2.5-flash")
     assert rem3 > 59.0
+
 
 
 def test_safe_account_dir_path_traversal_rejection(tmp_path):
@@ -563,7 +560,6 @@ async def test_401_rescue_prefers_rotate_cookies_over_browser_repair(monkeypatch
         result = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
             is_session_expired=True,
         )
         assert result is True
@@ -617,7 +613,6 @@ async def test_switch_target_login_redirect_marks_expired():
         result = await try_switch_account(
             model="gemini-3.8-flash",
             failed_account_id="acc_1",
-            is_auth_error=True,
             is_session_expired=True,
         )
         assert result is False

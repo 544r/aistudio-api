@@ -315,6 +315,8 @@ def test_parse_benefit_tier_and_update_account_tier(tmp_path):
     assert get_tier_header_value("Pro") == "TIER1"
     assert get_tier_header_value("Ultra") == "TIER2"
     assert get_tier_header_value("Plus") == "TIER0"
+    assert get_tier_header_value("Ultra_20X") == "TIER2"
+    assert get_tier_header_value("ultra_20x") == "TIER2"
 
     store = AccountStore(accounts_dir=tmp_path / "accounts_tier_test")
     acc = store.save_account(
@@ -328,6 +330,10 @@ def test_parse_benefit_tier_and_update_account_tier(tmp_path):
     assert reloaded is not None
     assert reloaded.tier == "Pro"
     assert store.update_account_tier(acc.id, "Pro") is False
+    assert store.update_account_tier(acc.id, "Ultra_20X") is True
+    reloaded_u20 = store.get_account(acc.id)
+    assert reloaded_u20 is not None
+    assert reloaded_u20.tier == "Ultra_20X"
 
 
 def test_parse_emails_from_ogs_html_and_meta_reconciliation(tmp_path):
@@ -674,7 +680,7 @@ async def test_probe_google_accounts_infinite_accepts_name_value_dict(monkeypatc
     """
     from aistudio_api.infrastructure.account import cookie_parser
 
-    async def fake_emails(_cookies, auth_user="0"):
+    async def fake_emails(_cookies, auth_user="0", **_kwargs):
         return {"0": "first@example.com", "1": "second@example.com"}
 
     monkeypatch.setattr(cookie_parser, "probe_account_emails_map", fake_emails)
