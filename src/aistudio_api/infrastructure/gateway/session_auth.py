@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -10,6 +11,7 @@ from urllib.parse import urlsplit
 
 from aistudio_api.domain.errors import SessionExpiredError
 from aistudio_api.infrastructure.account.cookie_parser import (
+    ACCOUNTS_ROOT_COOKIE_NAMES,
     DEFAULT_API_KEY,
     DEFAULT_EXT_BIN,
     DEFAULT_USER_AGENT,
@@ -404,6 +406,14 @@ async def verify_account_identity(page: CDPPage, auth_file: str | None) -> bool:
     return is_verified
 
 
+def _cookie_is_unexpired(cookie: dict[str, object], now: float) -> bool:
+    """expires 为 -1/0 表示会话 Cookie；正数必须是未来时间。"""
+    expires = cookie.get("expires")
+    if not isinstance(expires, (int, float)) or isinstance(expires, bool):
+        return True
+    return float(expires) <= 0 or float(expires) > now
+
+
 async def save_browser_cookies(
     page: CDPPage,
     auth_file: str | None,
@@ -425,17 +435,41 @@ async def save_browser_cookies(
         auth_path = Path(auth_file)
         origins = []
         previous_names: set[str] = set()
+        previous_cookies: list[dict[str, object]] = []
         if auth_path.exists():
             with suppress(Exception):
                 existing = json.loads(auth_path.read_text(encoding="utf-8"))
                 origins = existing.get("origins", [])
                 previous = existing.get("cookies")
                 if isinstance(previous, list):
+                    previous_cookies = [
+                        item for item in previous if isinstance(item, dict)
+                    ]
                     previous_names = {
-                        str(item.get("name") or "")
-                        for item in previous
-                        if isinstance(item, dict)
+                        str(item.get("name") or "") for item in previous_cookies
                     }
+        current_cookies = [item for item in current_cookies if isinstance(item, dict)]
+        current_names = {str(item.get("name") or "") for item in current_cookies}
+        # AI Studio 页面的浏览器罐看不到 accounts.google.com 的 host-only 根凭据。
+        # 原样回写会让推送带进来的 LSID / __Host-*PLSID 在第一次自动保存后消失，
+        # RotateCookies 抢救随后永远缺少原料。这里从上一份 auth.json 里补回来；
+        # 已经过期或浏览器显式删除（空值/不在罐里）的不补。
+        now = time.time()
+        preserved_roots = [
+            dict(item)
+            for item in previous_cookies
+            if str(item.get("name") or "") in ACCOUNTS_ROOT_COOKIE_NAMES
+            and str(item.get("name") or "") not in current_names
+            and item.get("value")
+            and _cookie_is_unexpired(item, now)
+        ]
+        if preserved_roots:
+            current_cookies = [*current_cookies, *preserved_roots]
+            log.debug(
+                "浏览器保存保留 %d 个 accounts 根凭据: %s",
+                len(preserved_roots),
+                ", ".join(str(item.get("name") or "") for item in preserved_roots),
+            )
         # 浏览器落盘的滚动代次由服务端（浏览器会话本身）推进过：打上标记，
         # 推送合并时据此保护这份代次不被另一台浏览器的旧代次顶回。
         #

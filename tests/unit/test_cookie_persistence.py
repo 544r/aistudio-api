@@ -154,3 +154,77 @@ async def test_save_browser_cookies_marks_rotated_only_for_new_rolling(tmp_path)
     assert await save_browser_cookies(page, str(auth_file))
     state = json.loads(auth_file.read_text(encoding="utf-8"))
     assert state["server_rotated"] is True
+
+
+@pytest.mark.asyncio
+async def test_save_browser_cookies_preserves_accounts_root_cookies(tmp_path):
+    """浏览器罐看不到 accounts.google.com 的 host-only 根凭据，回写时必须保留。
+
+    这些 Cookie 是 RotateCookies 401 抢救的原料；AI Studio 页面的
+    Network.getCookies 不会返回它们，直接覆盖 auth.json 会让抢救永远失效。
+    """
+    import json
+    import time
+
+    from aistudio_api.infrastructure.gateway.session_auth import (
+        save_browser_cookies,
+    )
+
+    now = int(time.time())
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "LSID",
+                        "value": "lsid-root",
+                        "domain": "accounts.google.com",
+                        "path": "/",
+                        "expires": now + 86400,
+                    },
+                    {
+                        "name": "__Host-1PLSID",
+                        "value": "plsid-root",
+                        "domain": "accounts.google.com",
+                        "path": "/",
+                        "expires": -1,
+                    },
+                    {
+                        "name": "__Host-GAPS",
+                        "value": "expired-root",
+                        "domain": "accounts.google.com",
+                        "path": "/",
+                        "expires": now - 60,
+                    },
+                    {
+                        "name": "SIDCC",
+                        "value": "old-sidcc",
+                        "domain": ".google.com",
+                        "path": "/",
+                    },
+                ],
+                "origins": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    page = _page_with_cookies(
+        [
+            {"name": "SAPISID", "value": "sapi", "domain": ".google.com", "path": "/"},
+            {
+                "name": "SIDCC",
+                "value": "new-sidcc",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ]
+    )
+
+    assert await save_browser_cookies(page, str(auth_file))
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    by_name = {str(c["name"]): c for c in state["cookies"]}
+    assert by_name["LSID"]["value"] == "lsid-root"
+    assert by_name["__Host-1PLSID"]["value"] == "plsid-root"
+    assert "__Host-GAPS" not in by_name
+    assert by_name["SIDCC"]["value"] == "new-sidcc"

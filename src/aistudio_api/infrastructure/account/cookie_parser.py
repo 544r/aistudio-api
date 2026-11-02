@@ -104,6 +104,14 @@ ROLLING_COOKIE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# accounts.google.com 的 host-only 会话根凭据。它们只在 accounts.google.com
+# 域名下可见，AI Studio 页面里的浏览器罐读不到；而 RotateCookies 抢救必须用到
+# 它们。浏览器回写 auth.json 时要显式保留，否则推送带进来的根凭据会在第一次
+# 自动保存后消失，401 抢救永远缺少原料。
+ACCOUNTS_ROOT_COOKIE_NAMES: frozenset[str] = frozenset(
+    {"LSID", "__Host-1PLSID", "__Host-3PLSID", "__Host-GAPS"}
+)
+
 # 外部导入时可安全丢弃的遥测及旧环境绑定的临时 Cookie。
 # 过滤这些 Cookie 既能让网页在当前 IP/环境重新自然下发全新凭据，
 # 又能精简内存与 Cookie 存储体积（尤其对 Android 低内存环境极为友好）。
