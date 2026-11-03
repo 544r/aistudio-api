@@ -25,7 +25,13 @@ def _atomic_write_json(path: Path, data: object) -> None:
             json.dumps(data, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
+        # auth.json 里是完整的 Google 会话凭据，不能依赖宿主 umask 决定权限；
+        # 临时文件先收紧到 0600，替换后再收紧一次（覆盖历史 0644 文件）。
+        with contextlib.suppress(OSError):
+            tmp_path.chmod(0o600)
         tmp_path.replace(target_path)
+        with contextlib.suppress(OSError):
+            target_path.chmod(0o600)
     except Exception:
         if tmp_path.exists():
             with contextlib.suppress(OSError):

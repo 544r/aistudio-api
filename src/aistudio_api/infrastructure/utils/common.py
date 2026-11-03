@@ -20,7 +20,13 @@ def atomic_write_json(path: Path | str, data: object) -> None:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # 这里也会写 auth.json（RotateCookies 落盘）和含 API Key 的运行配置，
+        # 统一 0600，避免被同机其他用户或宽松备份读走。
+        with contextlib.suppress(OSError):
+            tmp_path.chmod(0o600)
         tmp_path.replace(target_path)
+        with contextlib.suppress(OSError):
+            target_path.chmod(0o600)
     except Exception:
         if tmp_path.exists():
             with contextlib.suppress(OSError):

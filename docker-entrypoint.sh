@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# 容器里创建的所有文件默认仅属主可读写：auth.json / profile / 运行配置
+# 都含 Google 会话凭据或 API Key，不能按默认 022 umask 落成 0644。
+umask 077
+
 CONFIG_FILE="${AISTUDIO_CONFIG_FILE:-/app/data/config.yaml}"
 TEMPLATE_FILE="/app/defaults/config.yaml"
 FALLBACK_TEMPLATE="/app/config.yaml"
