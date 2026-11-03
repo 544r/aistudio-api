@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 from dataclasses import asdict
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path as FastApiPath, Query
@@ -19,6 +22,7 @@ from aistudio_api.domain.errors import SessionExpiredError
 from aistudio_api.infrastructure.account.account_store import AccountMeta
 from aistudio_api.infrastructure.account.cookie_parser import (
     ROLLING_COOKIE_NAMES,
+    SERVICE_SESSION_COOKIE_NAMES,
     build_storage_state_from_browser_cookies,
     merge_storage_states,
     missing_session_cookies,
@@ -27,7 +31,7 @@ from aistudio_api.infrastructure.account.cookie_parser import (
     probe_account_email,
     probe_google_accounts_infinite,
 )
-from aistudio_api.infrastructure.utils.common import mask_email
+from aistudio_api.infrastructure.utils.common import atomic_write_json, mask_email
 
 if TYPE_CHECKING:
     from aistudio_api.api.state import RuntimeState
@@ -116,6 +120,53 @@ def _push_conflicts_with_existing(
         base.get(name) and pushed.get(name) and base[name] != pushed[name]
         for name in pushed
     )
+
+
+_PUSH_ROLLING_SNAPSHOT_FILE = "push_rolling.json"
+
+
+def _rolling_push_snapshot(storage_state: dict[str, object]) -> dict[str, str]:
+    """推送罐里服务级滚动票的短指纹快照（不含 SIDCC 噪声）。
+
+    用来判断“这次推送相对推送方上一次推送，滚动票是否真的变了”。变了说明
+    用户浏览器刚刚活跃过（页面加载/恢复可见/实际使用触发了 Google 轮换），
+    即使服务端罐还活着也应该让推送接管；没变说明只是后台定时空转，继续让
+    服务端持有代次，避免两台客户端互相顶票。
+    """
+    cookies = storage_state.get("cookies")
+    if not isinstance(cookies, list):
+        return {}
+    snapshot: dict[str, str] = {}
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        value = item.get("value")
+        if name in SERVICE_SESSION_COOKIE_NAMES and value:
+            snapshot[name] = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+    return snapshot
+
+
+def _load_last_push_rolling(auth_path: str | None) -> dict[str, str] | None:
+    """读取账号上一次推送的滚动票指纹快照；没有历史返回 None。"""
+    if not auth_path:
+        return None
+    path = Path(auth_path).parent / _PUSH_ROLLING_SNAPSHOT_FILE
+    if not path.is_file():
+        return None
+    with contextlib.suppress(Exception):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    return None
+
+
+def _write_last_push_rolling(auth_path: str | None, snapshot: dict[str, str]) -> None:
+    if not auth_path:
+        return
+    path = Path(auth_path).parent / _PUSH_ROLLING_SNAPSHOT_FILE
+    with contextlib.suppress(Exception):
+        atomic_write_json(path, snapshot)
 
 
 def _merge_push_state(
@@ -688,6 +739,7 @@ async def push_cookies(
     merged_for_target: dict[str, object] = storage_state
     expired_before_push: dict[str, bool] = {}
     target_existing_state: dict[str, object] | None = None
+    target_auth_path: str | None = None
     if target is None:
         target = account_service.save_account_from_cookies(
             name=email or f"浏览器推送 (u/{auth_user})",
@@ -715,6 +767,13 @@ async def push_cookies(
         target_candidate_state = merge_storage_states(
             target_existing_state, storage_state
         )
+    target_auth_path = account_service.get_account_auth_path(target.id)
+    push_rolling_snapshot = _rolling_push_snapshot(storage_state)
+    last_push_rolling = _load_last_push_rolling(target_auth_path)
+    # 没有历史（首次推送）也视为“变了”：新账号/新罐应该能直接落地。
+    push_rolling_changed = (
+        last_push_rolling is None or last_push_rolling != push_rolling_snapshot
+    )
 
     probe_cookies: dict[str, str] = {}
     raw_candidate = target_candidate_state.get("cookies")
@@ -769,6 +828,10 @@ async def push_cookies(
     # - 服务端罐仍有效：滚动代次继续由罐持有，推送只更新长寿命凭据；
     # - 服务端罐已失效/无法确认：让推送接管滚动代次（账号刚坏但巡检还没
     #   标记时，旧逻辑会在这里保留死票，随后 60 秒回写又把新票盖掉）；
+    # - 推送的滚动票相对推送方上一次推送真的变了：浏览器刚活跃过（页面加载/
+    #   恢复可见/实际使用触发了 Google 轮换），即使服务端罐还活着也让推送
+    #   接管，避免“挂了几个小时回来后新票被丢掉、服务端守着旧代次”；
+    # - 没变：只是后台定时空转，继续保留服务端代次，避免两台客户端互顶；
     # - 推送带了与现有文件冲突的 SID/PSID：说明用户重新登录过或来自另一份
     #   会话，只换长寿命凭据会拼出两代凭据，必须整体采纳推送；
     # - 推送前已判失效：死马当活马医，仍然采纳，交给后续巡检确认。
@@ -798,6 +861,7 @@ async def push_cookies(
             session_valid is True
             and (
                 live_valid is not True
+                or push_rolling_changed
                 or _push_conflicts_with_existing(target_existing_state, storage_state)
             )
         )
@@ -856,14 +920,19 @@ async def push_cookies(
                 notes=acc.notes or "",
             )
 
-    if adopt_push and session_valid is True and probe_set_cookies:
+    # 无论本次是否采纳，都记录推送方的原始滚动票指纹；下一次推送据此判断
+    # 浏览器是否真的轮换了代次（后台空转的推送不会触发接管）。
+    for acc in updated_accounts:
+        _write_last_push_rolling(
+            account_service.get_account_auth_path(acc.id), push_rolling_snapshot
+        )
+
+    if adopt_push and session_valid is True and probe_set_cookies and target_auth_path:
         # 探活响应推进的服务会话票比推送更新一代：写回合并后的 auth.json，
         # 后面注入浏览器时自然带上。非采纳路径不写，避免混入被保护代次。
         from aistudio_api.application.account_health import _persist_rotated_cookies
 
-        target_auth_path = account_service.get_account_auth_path(target.id)
-        if target_auth_path:
-            _persist_rotated_cookies(target_auth_path, probe_set_cookies)
+        _persist_rotated_cookies(target_auth_path, probe_set_cookies)
 
     if adopt_push:
         reloaded_state = _load_account_state(account_service, target.id)
