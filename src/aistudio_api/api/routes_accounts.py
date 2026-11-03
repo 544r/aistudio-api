@@ -651,6 +651,7 @@ async def push_cookies(
 
     created = target is None
     merged_for_target: dict[str, object] = storage_state
+    expired_before_push: dict[str, bool] = {}
     if target is None:
         target = account_service.save_account_from_cookies(
             name=email or f"浏览器推送 (u/{auth_user})",
@@ -673,10 +674,12 @@ async def push_cookies(
             # 可能缺项；与账号现有 auth.json 合并，保留浏览器看不见但仍在
             # 工作的旧 Cookie，新推送的同名 Cookie 优先。
             existing_state = _load_account_state(account_service, acc.id)
+            was_expired = _is_account_session_expired(runtime_state, acc.id)
+            expired_before_push[acc.id] = was_expired
             merged_state = _merge_push_state(
                 existing_state,
                 storage_state,
-                account_expired=_is_account_session_expired(runtime_state, acc.id),
+                account_expired=was_expired,
             )
             if acc.id == target.id:
                 merged_for_target = merged_state
@@ -821,7 +824,18 @@ async def push_cookies(
             if target_auth and (
                 not current_auth or str(target_auth) == str(current_auth)
             ):
-                injected = await browser_session.reload_current_account_cookies()
+                # 推送前账号已被判失效：浏览器罐里的服务会话票就是死会话的旧票，
+                # 这次推送是救援，必须强制覆盖（否则热注入按"罐优先"保留旧票，
+                # 60 秒落盘又把它写回 auth.json，探活再次判失效）。
+                push_was_rescue = expired_before_push.get(active.id, False)
+                injected = await browser_session.reload_current_account_cookies(
+                    include_rolling=push_was_rescue
+                )
+                if push_was_rescue:
+                    log.info(
+                        "推送救援模式: 强制用推送的服务会话票覆盖浏览器罐旧票 (%s)",
+                        active.id,
+                    )
         except Exception as exc:
             log.warning("向浏览器热注入推送 Cookie 失败: %s", exc)
 

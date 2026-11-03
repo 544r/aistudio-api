@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlencode
 
@@ -626,6 +627,40 @@ async def test_push_cookies_injects_into_active_browser():
     assert resp.status_code == 200
     assert resp.json()["injected"] is True
     session.reload_current_account_cookies.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_rescue_forces_service_ticket_injection():
+    """推送前账号已判失效 → 救援模式，强制用推送的会话票覆盖罐里的旧票。
+
+    服务器实测（2026-11-03）：失效账号推送后，热注入按“罐优先”保留死会话的
+    旧服务票，60 秒落盘又写回 auth.json，健康检查随即再次判失效；只有删号
+    重建才恢复。救援模式必须强制覆盖。
+    """
+    target = _account()
+    svc = _mock_service([target])
+    svc.get_active_account.return_value = target
+    svc.get_account_auth_path.return_value = "data/accounts/acc_1/auth.json"
+    runtime_state.account_service = svc
+    rotator = MagicMock()
+    rotator.get_account_stats.return_value = SimpleNamespace(session_expired=True)
+    runtime_state.rotator = rotator
+
+    session = MagicMock()
+    session._auth_file = "data/accounts/acc_1/auth.json"
+    session.reload_current_account_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    session.reload_current_account_cookies.assert_awaited_once_with(
+        include_rolling=True
+    )
 
 
 @pytest.mark.asyncio
