@@ -401,7 +401,6 @@ def test_account_stats_short_cooldown_sync():
     assert rem3 > 59.0
 
 
-
 def test_safe_account_dir_path_traversal_rejection(tmp_path):
     """Verify _safe_account_dir rejects path traversal and malicious account IDs."""
     from aistudio_api.infrastructure.account.account_store import _safe_account_dir
@@ -670,7 +669,7 @@ async def test_rotate_cookies_rescue_reloads_active_browser(monkeypatch):
         assert await orchestrator._try_rotate_cookies_repair("acc_1") is True
         mock_rotator.set_session_expired.assert_called_once_with("acc_1", False)
         mock_session.reload_current_account_cookies.assert_awaited_once_with(
-            include_rolling=True
+            include_rolling=True, persist=True
         )
     finally:
         runtime_state.rotator = orig_rotator

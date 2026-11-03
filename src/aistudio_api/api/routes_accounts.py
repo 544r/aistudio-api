@@ -42,7 +42,9 @@ router = APIRouter(prefix="/accounts")
 def _is_account_session_expired(runtime_state: RuntimeState, account_id: str) -> bool:
     """该账号是否已被调度器判定为登录态失效。
 
-    用来决定推送能不能覆盖滚动代次凭据：服务端自己把链走死了才允许外部接管。
+    推送路径用它做两件事：推送前已失效的账号即使探活网络未知也按救援采纳，
+    并让注入强制覆盖浏览器罐里的死票。它不再是“能否接管滚动代次”的主判据
+    ——那个标记要等巡检更新，账号刚坏时会滞后。
     """
     rotator = runtime_state.rotator
     if rotator is None:
@@ -55,20 +57,6 @@ def _is_account_session_expired(runtime_state: RuntimeState, account_id: str) ->
     # 会把“未判失效”误读成“已判失效”从而放行覆盖
     expired = getattr(stats, "session_expired", None)
     return expired is True
-
-
-def _has_server_rotated_cookies(existing_state: dict[str, object] | None) -> bool:
-    """auth.json 是否带有服务端推进过的滚动代次标记。
-
-    探活回写与浏览器落盘会打上 `"server_rotated": true`（见
-    account_health._persist_rotated_cookies 与 session_auth.save_browser_cookies）。
-    没有标记的 auth.json 里，滚动代次就是上次推送的原文——推送方才是最新代次
-    的持有者，此时保护 base 反而会把旧代次锁死。会话保活每次导航都会刷新代次，
-    因此活跃账号的标记几乎总是存在；标记在推送接受新代次后清除，回到未推进态。
-    """
-    if not isinstance(existing_state, dict):
-        return False
-    return existing_state.get("server_rotated") is True
 
 
 def _load_account_state(
@@ -87,29 +75,73 @@ def _load_account_state(
     return None
 
 
+_SESSION_CORE_COOKIE_NAMES: frozenset[str] = frozenset(
+    {
+        "SID",
+        "SAPISID",
+        "__Secure-1PAPISID",
+        "__Secure-3PAPISID",
+        "__Secure-1PSID",
+        "__Secure-3PSID",
+    }
+)
+
+
+def _push_conflicts_with_existing(
+    existing_state: dict[str, object] | None,
+    storage_state: dict[str, object],
+) -> bool:
+    """推送是否带来了与现有 auth.json 冲突的长寿命凭据。
+
+    冲突意味着推送方已经重新登录或来自另一份会话：此时若只保留服务端的滚动
+    代次、却把 SID/PSID 换成推送值，会把两代凭据拼在一起，必须整体采纳推送罐。
+    推送只是补齐旧文件缺项（浏览器读不到的分区 Cookie）不算冲突。
+    """
+
+    def _values(state: dict[str, object] | None) -> dict[str, str]:
+        cookies = state.get("cookies") if isinstance(state, dict) else None
+        if not isinstance(cookies, list):
+            return {}
+        return {
+            str(item.get("name")): str(item.get("value") or "")
+            for item in cookies
+            if isinstance(item, dict)
+            and str(item.get("name") or "") in _SESSION_CORE_COOKIE_NAMES
+            and item.get("value")
+        }
+
+    base = _values(existing_state)
+    pushed = _values(storage_state)
+    return any(
+        base.get(name) and pushed.get(name) and base[name] != pushed[name]
+        for name in pushed
+    )
+
+
 def _merge_push_state(
     existing_state: dict[str, object] | None,
     storage_state: dict[str, object],
     *,
-    account_expired: bool,
+    adopt_push: bool,
 ) -> dict[str, object]:
     """把推送罐并入账号现有 auth.json。
 
-    滚动代次凭据（*PSIDTS / *PSIDRTS / SIDCC / *PSIDCC）不能盲目覆盖：
-    要覆盖的对象必须是“服务端自己推进过”的那份（探活回写 / 浏览器保活
-    落盘），否则会出现两边互相顶旧代次。判据是 auth.json 里的代次来源
-    ——服务端从未推进过的账号（auth.json 就是上次推送的原文），推送值
-    天然是最新代次，应该接受；标记了 `server_rotated` 的账号才保护。
+    滚动代次凭据（*PSIDTS / *PSIDRTS / SIDCC / *PSIDCC）的取舍只看一个事实：
+    这次推送的罐子是否通过了服务端探活。通过 = 推送方持有可用代次，允许它接管；
+    没通过或无法验证 = 保留 auth.json 里现有的代次，避免把服务端正在用的代次
+    回滚成另一台浏览器的旧值。
+
+    `adopt_push` 由 `push_cookies` 在写盘前根据探活结果决定，不再依赖调度器里
+    可能滞后的“登录态失效”标记——那个标记要等巡检或请求失败才更新，账号刚坏
+    还没被标记时推送会被误判成非救援。
     """
-    keep_rolling: tuple[str, ...] = ()
-    if _has_server_rotated_cookies(existing_state) and not account_expired:
-        keep_rolling = tuple(ROLLING_COOKIE_NAMES)
-    merged_state = merge_storage_states(
-        existing_state, storage_state, keep_base_names=keep_rolling
+    if adopt_push:
+        merged_state = merge_storage_states(existing_state, storage_state)
+        # 推送探活通过：推送方成为代次持有者，清掉服务端推进标记
+        return {k: v for k, v in merged_state.items() if k != "server_rotated"}
+    return merge_storage_states(
+        existing_state, storage_state, keep_base_names=tuple(ROLLING_COOKIE_NAMES)
     )
-    # 推送成为滚动代次的最新持有者：清除“服务端推进”标记，让下一次
-    # 浏览器/探活推进重新取得保护资格。
-    return {k: v for k, v in merged_state.items() if k != "server_rotated"}
 
 
 async def _discover_push_sub_accounts(
@@ -119,6 +151,7 @@ async def _discover_push_sub_accounts(
     target: AccountMeta,
     updated_ids: set[str],
     session_valid: bool | None,
+    adopt_push: bool,
     account_service: AccountService,
     runtime_state: RuntimeState,
 ) -> list[AccountMeta]:
@@ -183,7 +216,8 @@ async def _discover_push_sub_accounts(
             merged_state = _merge_push_state(
                 _load_account_state(account_service, existing.id),
                 storage_state,
-                account_expired=_is_account_session_expired(runtime_state, existing.id),
+                adopt_push=adopt_push
+                or _is_account_session_expired(runtime_state, existing.id),
             )
             resolved_tier = existing.tier or "Free"
             if resolved_tier == "Free" and probed_tier != "Free":
@@ -223,7 +257,8 @@ async def _discover_push_sub_accounts(
         rotator = runtime_state.rotator
         if rotator is not None:
             rotator.add_account(saved.id)
-            if session_valid is not False:
+            # 只有探活明确通过才解除失效；网络未知时保持原判
+            if session_valid is True:
                 rotator.set_session_expired(saved.id, False)
         touched.append(saved)
     return touched
@@ -652,6 +687,7 @@ async def push_cookies(
     created = target is None
     merged_for_target: dict[str, object] = storage_state
     expired_before_push: dict[str, bool] = {}
+    target_existing_state: dict[str, object] | None = None
     if target is None:
         target = account_service.save_account_from_cookies(
             name=email or f"浏览器推送 (u/{auth_user})",
@@ -661,6 +697,7 @@ async def push_cookies(
             cookie_id=f"cookie_{secrets.token_hex(4)}",
         )
         updated_accounts = [target]
+        target_candidate_state = storage_state
     else:
         group = [
             a
@@ -668,18 +705,115 @@ async def push_cookies(
             if target.cookie_id and (a.cookie_id or "") == target.cookie_id
         ]
         updated_accounts = group or [target]
+        for acc in updated_accounts:
+            expired_before_push[acc.id] = _is_account_session_expired(
+                runtime_state, acc.id
+            )
+        # 探活用一个“推送优先”的候选罐：推送的同名 Cookie 覆盖旧值，推送没带的
+        # 项（浏览器读不到的分区 Cookie 等）由现有 auth.json 补齐。
+        target_existing_state = _load_account_state(account_service, target.id)
+        target_candidate_state = merge_storage_states(
+            target_existing_state, storage_state
+        )
 
+    probe_cookies: dict[str, str] = {}
+    raw_candidate = target_candidate_state.get("cookies")
+    if isinstance(raw_candidate, list):
+        for item in raw_candidate:
+            if isinstance(item, dict) and item.get("name"):
+                probe_cookies.setdefault(
+                    str(item["name"]), str(item.get("value") or "")
+                )
+
+    was_expired_target = expired_before_push.get(target.id, False)
+    session_valid: bool | None = None
+    detected_tier: str | None = None
+    target_auth_user = target.auth_user or auth_user
+    need_tier_probe = (target.tier or "Free") == "Free"
+    probe_set_cookies: list[str] = []
+
+    async def _probe_session() -> bool | None:
+        try:
+            # 先只收集响应里的 Set-Cookie，不落盘：只有本次推送被采纳时才把
+            # 探活推进的新代次写回，避免“推送没通过却把受保护的代次换掉”。
+            return await probe_account_session(
+                probe_cookies,
+                auth_user=target_auth_user,
+                timeout=6.0,
+                set_cookie_sink=probe_set_cookies,
+            )
+        except Exception as exc:
+            log.debug("账号探活失败: %s", exc)
+            return None
+
+    async def _probe_tier() -> str | None:
+        try:
+            return await probe_account_benefit_tier(
+                probe_cookies, auth_user=target_auth_user
+            )
+        except Exception as exc:
+            log.debug("账号等级探测失败: %s", exc)
+            return None
+
+    if need_tier_probe and probe_cookies:
+        # 新推送/新建账号默认是 Free；这里与探活并行探测真实订阅等级，
+        # 避免每次推完还要去前端手动点「识别等级」。
+        session_valid, detected_tier = await asyncio.gather(
+            _probe_session(),
+            _probe_tier(),
+        )
+    else:
+        session_valid = await _probe_session()
+
+    # 推送罐探活通过后，还要看服务端自己的浏览器会话是否还活着：
+    # - 服务端罐仍有效：滚动代次继续由罐持有，推送只更新长寿命凭据；
+    # - 服务端罐已失效/无法确认：让推送接管滚动代次（账号刚坏但巡检还没
+    #   标记时，旧逻辑会在这里保留死票，随后 60 秒回写又把新票盖掉）；
+    # - 推送带了与现有文件冲突的 SID/PSID：说明用户重新登录过或来自另一份
+    #   会话，只换长寿命凭据会拼出两代凭据，必须整体采纳推送；
+    # - 推送前已判失效：死马当活马医，仍然采纳，交给后续巡检确认。
+    live_valid: bool | None = None
+    if not created and session_valid is True and not was_expired_target:
+        browser_session = (
+            runtime_state.client._session if runtime_state.client else None
+        )
+        active = account_service.get_active_account()
+        # 只有被推送的账号就是当前活跃账号时，才用浏览器罐的实测结果决定
+        # 是否让出滚动代次；推送的是同组其他 u/N 时，目标账号的 auth.json
+        # 才是以后切号要用的，直接采纳推送。
+        if (
+            browser_session is not None
+            and active is not None
+            and active.id == target.id
+        ):
+            with contextlib.suppress(Exception):
+                live_valid = await browser_session.probe_active_session(
+                    active.auth_user or "0"
+                )
+
+    adopt_push = (
+        created
+        or was_expired_target
+        or (
+            session_valid is True
+            and (
+                live_valid is not True
+                or _push_conflicts_with_existing(target_existing_state, storage_state)
+            )
+        )
+    )
+
+    if not created:
         for acc in updated_accounts:
             # 浏览器扩展读不到分区 Cookie（如 __Secure-1PSID）时，推送的罐
             # 可能缺项；与账号现有 auth.json 合并，保留浏览器看不见但仍在
             # 工作的旧 Cookie，新推送的同名 Cookie 优先。
             existing_state = _load_account_state(account_service, acc.id)
-            was_expired = _is_account_session_expired(runtime_state, acc.id)
-            expired_before_push[acc.id] = was_expired
+            was_expired = expired_before_push.get(acc.id, False)
             merged_state = _merge_push_state(
                 existing_state,
                 storage_state,
-                account_expired=was_expired,
+                adopt_push=adopt_push or was_expired,
             )
             if acc.id == target.id:
                 merged_for_target = merged_state
@@ -722,11 +856,25 @@ async def push_cookies(
                 notes=acc.notes or "",
             )
 
-    probe_cookies: dict[str, str] = {}
+    if adopt_push and session_valid is True and probe_set_cookies:
+        # 探活响应推进的服务会话票比推送更新一代：写回合并后的 auth.json，
+        # 后面注入浏览器时自然带上。非采纳路径不写，避免混入被保护代次。
+        from aistudio_api.application.account_health import _persist_rotated_cookies
+
+        target_auth_path = account_service.get_account_auth_path(target.id)
+        if target_auth_path:
+            _persist_rotated_cookies(target_auth_path, probe_set_cookies)
+
+    if adopt_push:
+        reloaded_state = _load_account_state(account_service, target.id)
+        if reloaded_state is not None:
+            merged_for_target = reloaded_state
+
     merged_cookie_list: list[dict[str, object]] = []
     raw_merged = merged_for_target.get("cookies")
     if isinstance(raw_merged, list):
         merged_cookie_list = [item for item in raw_merged if isinstance(item, dict)]
+        probe_cookies = {}
         for item in merged_cookie_list:
             if item.get("name"):
                 probe_cookies.setdefault(
@@ -735,45 +883,12 @@ async def push_cookies(
 
     if runtime_state.rotator is not None:
         for acc in updated_accounts:
-            runtime_state.rotator.set_session_expired(acc.id, False)
-
-    session_valid: bool | None = None
-    detected_tier: str | None = None
-    target_auth_user = target.auth_user or auth_user
-    need_tier_probe = (target.tier or "Free") == "Free"
-
-    async def _probe_session() -> bool | None:
-        try:
-            # 用合并后的 jar 探活（而不是浏览器推来的那一份），并把探活响应里
-            # Google 下发的新一代滚动 Cookie 直接落盘，探活顺带完成一次向前轮换。
-            return await probe_account_session(
-                probe_cookies,
-                auth_user=target_auth_user,
-                timeout=6.0,
-                persist_to=account_service.get_account_auth_path(target.id),
-            )
-        except Exception as exc:
-            log.debug("账号探活失败: %s", exc)
-            return None
-
-    async def _probe_tier() -> str | None:
-        try:
-            return await probe_account_benefit_tier(
-                probe_cookies, auth_user=target_auth_user
-            )
-        except Exception as exc:
-            log.debug("账号等级探测失败: %s", exc)
-            return None
-
-    if need_tier_probe and probe_cookies:
-        # 新推送/新建账号默认是 Free；这里与探活并行探测真实订阅等级，
-        # 避免每次推完还要去前端手动点「识别等级」。
-        session_valid, detected_tier = await asyncio.gather(
-            _probe_session(),
-            _probe_tier(),
-        )
-    else:
-        session_valid = await _probe_session()
+            # 探活明确通过才解除失效，明确失败才标记失效；网络未知时保持原判，
+            # 避免一次超时把刚判失效的账号误恢复成可调度状态。
+            if session_valid is True:
+                runtime_state.rotator.set_session_expired(acc.id, False)
+            elif session_valid is False:
+                runtime_state.rotator.set_session_expired(acc.id, True)
 
     if (
         detected_tier
@@ -788,10 +903,6 @@ async def push_cookies(
         )
         target = account_service.get_account(target.id) or target
 
-    if session_valid is False and runtime_state.rotator is not None:
-        for acc in updated_accounts:
-            runtime_state.rotator.set_session_expired(acc.id, True)
-
     discovered: list[AccountMeta] = []
     if req.discover_all:
         discovered = await _discover_push_sub_accounts(
@@ -800,6 +911,7 @@ async def push_cookies(
             target=target,
             updated_ids={acc.id for acc in updated_accounts},
             session_valid=session_valid,
+            adopt_push=adopt_push,
             account_service=account_service,
             runtime_state=runtime_state,
         )
@@ -824,17 +936,23 @@ async def push_cookies(
             if target_auth and (
                 not current_auth or str(target_auth) == str(current_auth)
             ):
-                # 推送前账号已被判失效：浏览器罐里的服务会话票就是死会话的旧票，
-                # 这次推送是救援，必须强制覆盖（否则热注入按"罐优先"保留旧票，
-                # 60 秒落盘又把它写回 auth.json，探活再次判失效）。
-                push_was_rescue = expired_before_push.get(active.id, False)
-                injected = await browser_session.reload_current_account_cookies(
-                    include_rolling=push_was_rescue
+                # 只有“被推送的账号就是活跃账号且已决定接管”或“活跃账号本身
+                # 推送前已失效”时才强制覆盖服务票；推送的是同组其他 u/N 时，
+                # 活跃账号继续罐优先，避免拿别人的会话票去顶它的代次。
+                # 注入和即时落盘在会话的 Cookie 保存锁内完成，60 秒定时回写
+                # 不会再用注入前的旧罐把刚推的值盖回去。
+                include_rolling = (
+                    adopt_push and active.id == target.id
+                ) or expired_before_push.get(active.id, False)
+                injected = await browser_session.apply_pushed_cookies(
+                    target_auth, include_rolling=include_rolling
                 )
-                if push_was_rescue:
+                if include_rolling:
                     log.info(
-                        "推送救援模式: 强制用推送的服务会话票覆盖浏览器罐旧票 (%s)",
+                        "推送接管模式: 强制用推送的服务会话票覆盖浏览器罐 "
+                        "(%s, 推送前已失效=%s)",
                         active.id,
+                        expired_before_push.get(active.id, False),
                     )
         except Exception as exc:
             log.warning("向浏览器热注入推送 Cookie 失败: %s", exc)

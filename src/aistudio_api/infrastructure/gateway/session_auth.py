@@ -144,14 +144,14 @@ async def load_cookies_to_page(
     - PSIDTS/PSIDRTS/`__Olefcr-*` 服务级会话票：aistudio.google.com 凭它认
       登录态，缺失即被弹回登录页且 Google 不会补发。默认从 auth.json 注入，
       但罐里已有实时代次时罐优先（热刷新不回滚）；`include_rolling=True`
-      （仅 RotateCookies 抢救）强制用磁盘最新值覆盖。
+      （RotateCookies 抢救 / 推送接管）强制用磁盘最新值覆盖。
     - 长寿命凭据（SID / PSID / APISID 系）照常覆盖。
 
     - 默认：不清罐。适用于同账号热刷新、冷启动加载本账号 profile、登录页重注入。
     - `clear_first=True`（换账号）：先清空罐与缓存再注入，防止上一个账号的
       凭据残留。
-    - `include_rolling=True`（仅 RotateCookies 抢救）：auth.json 刚被
-      RotateCookies/推送推进到最新一代，此刻磁盘才是权威，强制覆盖服务级会话票。
+    - `include_rolling=True`（RotateCookies 抢救 / 推送接管）：auth.json 刚被
+      RotateCookies 响应或推送到最新一代，此刻磁盘才是权威，强制覆盖服务级会话票。
     """
     if not auth_file or not Path(auth_file).is_file():
         return False
@@ -454,7 +454,6 @@ async def save_browser_cookies(
             return False
         auth_path = Path(auth_file)
         origins = []
-        previous_names: set[str] = set()
         previous_cookies: list[dict[str, object]] = []
         if auth_path.exists():
             with suppress(Exception):
@@ -465,9 +464,6 @@ async def save_browser_cookies(
                     previous_cookies = [
                         item for item in previous if isinstance(item, dict)
                     ]
-                    previous_names = {
-                        str(item.get("name") or "") for item in previous_cookies
-                    }
         current_cookies = [item for item in current_cookies if isinstance(item, dict)]
         current_names = {str(item.get("name") or "") for item in current_cookies}
         # AI Studio 页面的浏览器罐看不到 accounts.google.com 的 host-only 根凭据
@@ -493,21 +489,31 @@ async def save_browser_cookies(
                 ", ".join(str(item.get("name") or "") for item in preserved_roots),
             )
         # 浏览器落盘的滚动代次由服务端（浏览器会话本身）推进过：打上标记，
-        # 推送合并时据此保护这份代次不被另一台浏览器的旧代次顶回。
+        # 供轮换流水/排查判断这份 auth.json 的代次来源。
         #
-        # 判据是「服务级会话票在浏览器里确实出现了，而上一份 auth.json 里没有」。
-        # 只认 PSIDTS/PSIDRTS/Olefcr 这类服务会话票——SIDCC 系 Google 对任何响应
-        # （包括未登录请求）都会重发，探活/导航推进 SIDCC 不构成"服务端会话推进"，
-        # 误打标记会把推送带来的新鲜会话票挡在 auth.json 外面。
-        browser_service_tokens = {
-            str(item.get("name") or "")
+        # 判据是服务级会话票的**值**发生了变化（或出现了新名字），而不只是
+        # 名字首次出现——PSIDTS/PSIDRTS 每次轮换都是同名换值，按名字判断会
+        # 让标记永远不更新，历史上据此保护代次时会把服务端已推进的新值误判
+        # 成“从未推进”。SIDCC 系 Google 对任何响应（包括未登录请求）都会
+        # 重发，不构成服务会话推进，不参与判断。
+        previous_service_values = {
+            str(item.get("name") or ""): str(item.get("value") or "")
+            for item in previous_cookies
+            if str(item.get("name") or "") in SERVICE_SESSION_COOKIE_NAMES
+            and item.get("value")
+        }
+        current_service_values = {
+            str(item.get("name") or ""): str(item.get("value") or "")
             for item in current_cookies
             if isinstance(item, dict)
             and str(item.get("name") or "") in SERVICE_SESSION_COOKIE_NAMES
             and item.get("value")
         }
         state: dict[str, object] = {"cookies": current_cookies, "origins": origins}
-        if browser_service_tokens - previous_names:
+        if any(
+            value != previous_service_values.get(name)
+            for name, value in current_service_values.items()
+        ):
             state["server_rotated"] = True
         atomic_write_json(auth_path, state)
         if quiet:
@@ -601,9 +607,13 @@ async def navigate_to_aistudio(
                     "访问 AI Studio 后检测到重定向至登录页: %s，尝试重新注入 Cookie...",
                     current_url,
                 )
-                # 登录页重注入不清空浏览器罐：罐里的滚动代次可能比 auth.json 快照
-                # 新，清罐重灌等于把旧代次再交一遍，Google 会直接判会话异常。
-                if not await load_cookies_to_page(page, auth_file):
+                # 登录页重注入不清空浏览器罐：罐里的长寿命凭据和 SIDCC 仍由
+                # 浏览器持有。但服务会话票要强制用 auth.json 的最新值——页面
+                # 被弹到登录页本身就是罐里那代票认证失败的证据，继续“罐优先”
+                # 只会把死票再交一遍。
+                if not await load_cookies_to_page(
+                    page, auth_file, include_rolling=True
+                ):
                     raise SessionExpiredError(
                         f"Cookie 认证失败，已被重定向到 Google 登录页。 (url={current_url})"
                     )

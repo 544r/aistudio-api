@@ -239,13 +239,16 @@ def _persist_rotated_cookies(auth_path: str | Path, lines: list[str]) -> list[st
         merged, changed = apply_set_cookie_lines(state, lines)
         if not changed:
             return []
-        # 标记“这份 auth.json 的服务级会话票由服务端会话推进过”：推送合并时据此
-        # 保护这份代次不被另一台浏览器的旧代次顶回（见 routes_accounts）。
+        # 标记“这份 auth.json 的服务级会话票由服务端会话推进过”，仅供轮换
+        # 流水与排查判断代次来源；推送是否采纳不再看它，而是看推送罐自己的
+        # 探活结果（标记无法区分服务端会话是活的还是已经死了）。
         #
         # 只认 PSIDTS/PSIDRTS/Olefcr 服务会话票的推进。SIDCC 系 Google 对任何
-        # 响应（包括未登录请求）都会重发，探活推进 SIDCC 不构成服务会话推进，
-        # 误打标记会把推送带来的新鲜会话票挡在外面，服务端守着旧代次直到过期。
+        # 响应（包括未登录请求）都会重发，探活推进 SIDCC 不构成服务会话推进。
         if any(name in SERVICE_SESSION_COOKIE_NAMES for name in changed):
+            merged["server_rotated"] = True
+        elif state.get("server_rotated") is True:
+            # SIDCC 噪声变更不应把已有的来源标记清掉
             merged["server_rotated"] = True
         atomic_write_json(target, merged)
     except Exception as exc:
@@ -271,6 +274,7 @@ async def probe_account_session(
     *,
     timeout: float = 8.0,
     persist_to: str | Path | None = None,
+    set_cookie_sink: list[str] | None = None,
 ) -> bool | None:
     """用账号 Cookie 请求 ListModels，判断登录态是否仍有效。
 
@@ -278,6 +282,9 @@ async def probe_account_session(
     `Set-Cookie` 合并回该文件。这一步是无人值守续命的关键：ListModels 探活本来
     就每 10 分钟对全部启用账号跑一次，顺手把响应里的新一代 PSIDTS / SIDCC 落盘，
     闲置账号的滚动链也在往前走，就不需要靠人挂着浏览器反复推送了。
+
+    传入 `set_cookie_sink` 时只收集、不写盘：推送路径需要先拿到探活结论，
+    决定是否采纳这次推送，再决定这些新代次要不要落盘。
 
     Returns:
         True 有效；False 上游明确返回 401；None 网络异常或未知状态。
@@ -312,6 +319,9 @@ async def probe_account_session(
     except Exception as exc:
         logger.debug("账号探活请求失败: %s", exc)
         return None
+
+    if set_cookie_sink is not None:
+        set_cookie_sink.extend(response.headers.get_list("set-cookie"))
 
     if persist_to is not None:
         _persist_rotated_cookies(persist_to, response.headers.get_list("set-cookie"))

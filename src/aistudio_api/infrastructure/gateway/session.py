@@ -6,7 +6,7 @@ import asyncio
 import gc
 import json
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from hashlib import sha256
 from pathlib import Path
 
@@ -314,7 +314,11 @@ class BrowserSession:
                 )
 
                 async def _reload_cb(page: CDPPage) -> bool:
-                    return await load_cookies_to_page(page, auth_file)
+                    # 已被弹到登录页 = 罐里的服务会话票认证失败，此时“罐优先”
+                    # 只会把死票再交一遍；强制改用磁盘镜像里的最新会话票。
+                    return await load_cookies_to_page(
+                        page, auth_file, include_rolling=True
+                    )
 
                 snap_key, base_template = await bootstrap_botguard_and_template(
                     new_page,
@@ -639,21 +643,99 @@ class BrowserSession:
         page: CDPPage | None = None,
         *,
         include_rolling: bool = False,
+        persist: bool = False,
     ) -> bool:
-        """热刷新当前账号的 Cookie（油猴推送覆盖走这里）。
+        """热刷新当前账号的 Cookie（RotateCookies 抢救后回灌走这里）。
 
         默认只覆盖长寿命凭据，浏览器罐里已有的滚动代次保持不动——罐才是代次链
         的权威，auth.json 镜像不允许回滚它。
 
         `include_rolling=True` 仅用于 RotateCookies 抢救：auth.json 刚被
         RotateCookies 响应推进到最新一代，此刻磁盘才是权威，把滚动代次一并灌入。
+        `persist=True` 让注入和立即落盘在同一把锁内完成，防止 60 秒定时回写用
+        注入前的旧罐把刚灌进来的代次盖回去。油猴推送走 `apply_pushed_cookies`。
         """
         target = page or (self.active_context.page if self.active_context else None)
-        return bool(
-            target
-            and await load_cookies_to_page(
+        if target is None:
+            return False
+        if persist:
+            return await self._apply_cookies_and_persist(
                 target, self._auth_file, include_rolling=include_rolling
             )
+        return bool(
+            await load_cookies_to_page(
+                target, self._auth_file, include_rolling=include_rolling
+            )
+        )
+
+    async def _apply_cookies_and_persist(
+        self,
+        page: CDPPage | None,
+        auth_file: str | None,
+        *,
+        include_rolling: bool,
+    ) -> bool:
+        """注入磁盘罐后立即落盘，与定时回写共用同一把锁。"""
+        if page is None or page.is_closed() or not auth_file:
+            return False
+        async with self._cookie_save_lock:
+            injected = await load_cookies_to_page(
+                page, auth_file, include_rolling=include_rolling
+            )
+            if not injected:
+                return False
+            with suppress(Exception):
+                await self._save_cookies(
+                    page=page,
+                    auth_file=auth_file,
+                    force=True,
+                    quiet=True,
+                    _lock_held=True,
+                )
+            return True
+
+    async def apply_pushed_cookies(
+        self,
+        auth_file: str,
+        *,
+        include_rolling: bool = False,
+    ) -> bool:
+        """推送专用：注入推送罐并立即回写。
+
+        只有注入而不立刻落盘的话，60 秒定时回写可能读取注入前的旧罐，
+        在推送写盘之后又把旧代次盖回去（服务器实测过的“推送成功但没生效”）。
+        """
+        ctx = self.active_context
+        page = ctx.page if ctx is not None else None
+        return await self._apply_cookies_and_persist(
+            page, auth_file, include_rolling=include_rolling
+        )
+
+    async def probe_active_session(self, auth_user: str = "0") -> bool | None:
+        """用浏览器当前罐实测登录态（只读，不写盘）。
+
+        推送时用来判断服务端自己的会话是不是还活着：如果活着，滚动代次继续
+        由浏览器罐持有，推送只更新长寿命凭据；如果已经死了（或无法确认），
+        才让推送接管滚动代次。这样既不会让推送无效，也不会让两边互相顶代数。
+        """
+        page = self.page
+        if page is None or page.is_closed():
+            return None
+        try:
+            cookies = await page.get_cookies()
+        except Exception:
+            return None
+        cookie_dict = {
+            str(item.get("name") or ""): str(item.get("value") or "")
+            for item in cookies
+            if isinstance(item, dict) and item.get("name") and item.get("value")
+        }
+        if not cookie_dict:
+            return None
+        from aistudio_api.application.account_health import probe_account_session
+
+        return await probe_account_session(
+            cookie_dict, auth_user=auth_user, timeout=6.0
         )
 
     async def save_active_cookies(self, *, force: bool = True) -> bool:
@@ -688,6 +770,7 @@ class BrowserSession:
         page: CDPPage | None = None,
         force: bool = False,
         quiet: bool = False,
+        _lock_held: bool = False,
     ) -> bool:
         """Write current browser cookies back, skipping unchanged or logged-out jars."""
         target = page or self.page
@@ -697,7 +780,8 @@ class BrowserSession:
         auth_path = Path(target_auth)
         if not auth_path.parent.is_dir():
             return False
-        async with self._cookie_save_lock:
+        lock = nullcontext() if _lock_held else self._cookie_save_lock
+        async with lock:
             try:
                 current_cookies = cookies
                 if current_cookies is None:

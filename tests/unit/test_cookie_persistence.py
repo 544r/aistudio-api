@@ -95,10 +95,11 @@ async def test_save_cookies_skips_missing_account_directory(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_browser_cookies_marks_rotated_only_for_new_rolling(tmp_path):
-    """浏览器落盘：只有 auth.json 里没有的滚动代次出现时才打 server_rotated。
+async def test_save_browser_cookies_marks_rotated_on_service_ticket_advance(tmp_path):
+    """浏览器落盘：服务会话票的值发生变化（同名换值）时打 server_rotated。
 
-    每次导航都无条件置位会让标记恒真，推送带来的新代次永远被挡在门外。
+    每次导航都无条件置位会让标记恒真；反过来，只在“新名字首次出现”时置位
+    会让 PSIDTS 每次同名换值都看不到推进。SIDCC 系是全局噪声，不算推进。
     """
     import json
 
@@ -138,6 +139,7 @@ async def test_save_browser_cookies_marks_rotated_only_for_new_rolling(tmp_path)
 
     assert await save_browser_cookies(page, str(auth_file))
     state = json.loads(auth_file.read_text(encoding="utf-8"))
+    # 只有 SIDCC 变化：不构成服务会话推进
     assert "server_rotated" not in state
 
     page = _page_with_cookies(
@@ -146,6 +148,21 @@ async def test_save_browser_cookies_marks_rotated_only_for_new_rolling(tmp_path)
             {
                 "name": "__Secure-1PSIDTS",
                 "value": "new-ts",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ]
+    )
+    assert await save_browser_cookies(page, str(auth_file))
+    state = json.loads(auth_file.read_text(encoding="utf-8"))
+    assert state["server_rotated"] is True
+
+    page = _page_with_cookies(
+        [
+            {"name": "SAPISID", "value": "sapi", "domain": ".google.com", "path": "/"},
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "newer-ts",
                 "domain": ".google.com",
                 "path": "/",
             },
@@ -228,3 +245,118 @@ async def test_save_browser_cookies_preserves_accounts_root_cookies(tmp_path):
     assert by_name["__Host-1PLSID"]["value"] == "plsid-root"
     assert "__Host-GAPS" not in by_name
     assert by_name["SIDCC"]["value"] == "new-sidcc"
+
+
+@pytest.mark.asyncio
+async def test_apply_pushed_cookies_injects_then_saves():
+    """推送注入必须紧接着在锁内落盘，不能留给 60 秒回写用旧罐覆盖。"""
+    from types import SimpleNamespace
+
+    session = BrowserSession(port=9222)
+    page = MagicMock(spec=CDPPage)
+    page.is_closed = MagicMock(return_value=False)
+    session._gate = MagicMock(active_context=SimpleNamespace(page=page))
+
+    with (
+        patch(
+            "aistudio_api.infrastructure.gateway.session.load_cookies_to_page",
+            AsyncMock(return_value=True),
+        ) as inject,
+        patch.object(session, "_save_cookies", AsyncMock(return_value=True)) as save,
+    ):
+        assert await session.apply_pushed_cookies(
+            "data/accounts/acc_1/auth.json", include_rolling=True
+        )
+
+    inject.assert_awaited_once_with(
+        page, "data/accounts/acc_1/auth.json", include_rolling=True
+    )
+    save.assert_awaited_once()
+    assert save.await_args.kwargs["auth_file"] == "data/accounts/acc_1/auth.json"
+    assert save.await_args.kwargs["force"] is True
+    assert save.await_args.kwargs["_lock_held"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_pushed_cookies_skips_save_when_injection_fails():
+    from types import SimpleNamespace
+
+    session = BrowserSession(port=9222)
+    page = MagicMock(spec=CDPPage)
+    page.is_closed = MagicMock(return_value=False)
+    session._gate = MagicMock(active_context=SimpleNamespace(page=page))
+
+    with (
+        patch(
+            "aistudio_api.infrastructure.gateway.session.load_cookies_to_page",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(session, "_save_cookies", AsyncMock(return_value=True)) as save,
+    ):
+        assert not await session.apply_pushed_cookies(
+            "data/accounts/acc_1/auth.json", include_rolling=False
+        )
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reload_with_persist_serializes_injection_and_save():
+    """RotateCookies 抢救路径也要注入后立即落盘，避免被定时回写覆盖。"""
+    from types import SimpleNamespace
+
+    session = BrowserSession(port=9222)
+    session._auth_file = "data/accounts/acc_1/auth.json"
+    page = MagicMock(spec=CDPPage)
+    page.is_closed = MagicMock(return_value=False)
+    session._gate = MagicMock(active_context=SimpleNamespace(page=page))
+
+    with (
+        patch(
+            "aistudio_api.infrastructure.gateway.session.load_cookies_to_page",
+            AsyncMock(return_value=True),
+        ) as inject,
+        patch.object(session, "_save_cookies", AsyncMock(return_value=True)) as save,
+    ):
+        assert await session.reload_current_account_cookies(
+            include_rolling=True, persist=True
+        )
+
+    inject.assert_awaited_once_with(
+        page, "data/accounts/acc_1/auth.json", include_rolling=True
+    )
+    save.assert_awaited_once()
+    assert save.await_args.kwargs["_lock_held"] is True
+
+
+@pytest.mark.asyncio
+async def test_probe_active_session_uses_browser_jar(monkeypatch):
+    from types import SimpleNamespace
+
+    session = BrowserSession(port=9222)
+    page = _page_with_cookies(
+        [
+            {"name": "SID", "value": "sid-live", "domain": ".google.com", "path": "/"},
+            {
+                "name": "SAPISID",
+                "value": "sapi-live",
+                "domain": ".google.com",
+                "path": "/",
+            },
+        ]
+    )
+    session._gate = MagicMock(active_context=SimpleNamespace(page=page))
+    captured: dict[str, str] = {}
+
+    async def fake_probe(cookies, auth_user="0", *, timeout=8.0):
+        captured.update(cookies)
+        assert auth_user == "1"
+        return True
+
+    monkeypatch.setattr(
+        "aistudio_api.application.account_health.probe_account_session",
+        fake_probe,
+    )
+
+    assert await session.probe_active_session("1") is True
+    assert captured == {"SID": "sid-live", "SAPISID": "sapi-live"}

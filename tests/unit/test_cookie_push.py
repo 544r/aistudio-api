@@ -111,7 +111,9 @@ def restore_runtime_state():
 
 @pytest.fixture(autouse=True)
 def stub_probe(monkeypatch):
-    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0, persist_to=None):
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
         return True
 
     async def fake_tier(_cookies, auth_user="0"):
@@ -615,7 +617,7 @@ async def test_push_cookies_injects_into_active_browser():
 
     session = MagicMock()
     session._auth_file = "data/accounts/acc_1/auth.json"
-    session.reload_current_account_cookies = AsyncMock(return_value=True)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
     runtime_state.client = MagicMock(_session=session)
 
     async with _client() as client:
@@ -626,16 +628,19 @@ async def test_push_cookies_injects_into_active_browser():
 
     assert resp.status_code == 200
     assert resp.json()["injected"] is True
-    session.reload_current_account_cookies.assert_awaited_once()
+    # 推送罐探活通过：接管滚动代次，注入时强制覆盖罐里的服务票
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        "data/accounts/acc_1/auth.json", include_rolling=True
+    )
 
 
 @pytest.mark.asyncio
 async def test_push_cookies_rescue_forces_service_ticket_injection():
-    """推送前账号已判失效 → 救援模式，强制用推送的会话票覆盖罐里的旧票。
+    """推送前账号已判失效 → 推送罐探活通过后强制覆盖罐里的旧票。
 
     服务器实测（2026-11-03）：失效账号推送后，热注入按“罐优先”保留死会话的
     旧服务票，60 秒落盘又写回 auth.json，健康检查随即再次判失效；只有删号
-    重建才恢复。救援模式必须强制覆盖。
+    重建才恢复。推送接管必须强制覆盖。
     """
     target = _account()
     svc = _mock_service([target])
@@ -648,7 +653,7 @@ async def test_push_cookies_rescue_forces_service_ticket_injection():
 
     session = MagicMock()
     session._auth_file = "data/accounts/acc_1/auth.json"
-    session.reload_current_account_cookies = AsyncMock(return_value=True)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
     runtime_state.client = MagicMock(_session=session)
 
     async with _client() as client:
@@ -658,8 +663,43 @@ async def test_push_cookies_rescue_forces_service_ticket_injection():
         )
 
     assert resp.status_code == 200
-    session.reload_current_account_cookies.assert_awaited_once_with(
-        include_rolling=True
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        "data/accounts/acc_1/auth.json", include_rolling=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_valid_jar_forces_injection_without_expired_flag():
+    """账号还没被巡检判失效，但推送罐探活通过：也要接管罐里的旧票。
+
+    旧逻辑只看调度器的 expired 标记；账号刚坏、巡检还没跑时标记是 False，
+    推送的新票进不了浏览器，随后定时回写又用旧票覆盖 auth.json，表现就是
+    “推送成功但没生效”。判据必须是推送罐自己的探活结果。
+    """
+    target = _account()
+    svc = _mock_service([target])
+    svc.get_active_account.return_value = target
+    svc.get_account_auth_path.return_value = "data/accounts/acc_1/auth.json"
+    runtime_state.account_service = svc
+    rotator = MagicMock()
+    rotator.get_account_stats.return_value = SimpleNamespace(session_expired=False)
+    runtime_state.rotator = rotator
+
+    session = MagicMock()
+    session._auth_file = "data/accounts/acc_1/auth.json"
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_valid"] is True
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        "data/accounts/acc_1/auth.json", include_rolling=True
     )
 
 
@@ -684,7 +724,9 @@ async def test_push_cookies_skips_injection_without_browser():
 
 @pytest.mark.asyncio
 async def test_push_cookies_marks_session_invalid_when_probe_fails(monkeypatch):
-    async def fake_probe(_cookies, auth_user="0", *, timeout=8.0, persist_to=None):
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
         return False
 
     monkeypatch.setattr(
@@ -705,8 +747,38 @@ async def test_push_cookies_marks_session_invalid_when_probe_fails(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["session_valid"] is False
-    runtime_state.rotator.set_session_expired.assert_any_call("acc_1", False)
-    runtime_state.rotator.set_session_expired.assert_any_call("acc_1", True)
+    # 明确失败才标记失效；不再先无条件清除再根据结果回填
+    runtime_state.rotator.set_session_expired.assert_called_once_with("acc_1", True)
+
+
+@pytest.mark.asyncio
+async def test_push_cookies_keeps_expired_state_when_probe_unknown(monkeypatch):
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
+        return None
+
+    monkeypatch.setattr(
+        "aistudio_api.application.account_health.probe_account_session",
+        fake_probe,
+    )
+    target = _account()
+    svc = _mock_service([target])
+    runtime_state.account_service = svc
+    rotator = MagicMock()
+    rotator.get_account_stats.return_value = SimpleNamespace(session_expired=True)
+    runtime_state.rotator = rotator
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": _full_jar(), "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_valid"] is None
+    # 网络未知：既不能误判有效，也不能把已失效账号误恢复成可调度
+    rotator.set_session_expired.assert_not_called()
 
 
 # ==================== 禁用名单（主号保护） ====================
@@ -1117,12 +1189,43 @@ def _rolling_auth_file(tmp_path, *, server_rotated: bool, ts_value: str) -> Path
     return auth_file
 
 
-@pytest.mark.asyncio
-async def test_push_overwrites_stale_generation_when_server_never_rotated(tmp_path):
-    """auth.json 只是上次推送的原文（无 server_rotated 标记）时接受推送的新代次。
+def _auth_file_matching_full_jar(tmp_path, *, ts_value: str) -> Path:
+    """长寿命凭据与 _full_jar 完全一致，只有滚动代次不同。"""
+    cookies = [
+        dict(item)
+        for item in _full_jar()
+        if item["name"]
+        in {
+            "SID",
+            "SAPISID",
+            "__Secure-1PSID",
+            "__Secure-3PSID",
+        }
+    ]
+    cookies.append(
+        {
+            "name": "__Secure-1PSIDTS",
+            "value": ts_value,
+            "domain": ".google.com",
+            "path": "/",
+            "expires": -1,
+            "secure": True,
+            "httpOnly": True,
+        }
+    )
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"cookies": cookies, "origins": []}), encoding="utf-8"
+    )
+    return auth_file
 
-    场景：服务端探活还没来得及回写，磁盘上还是旧代次；推送方浏览器拿着最新
-    代次来。此时保护 base 会把旧代次锁死，等于亲手制造下一次 401。
+
+@pytest.mark.asyncio
+async def test_push_overwrites_stale_generation_when_push_probe_passes(tmp_path):
+    """推送罐探活通过：即便 auth.json 标着 server_rotated，也接受推送的新代次。
+
+    服务端旧代次可能已经死了（或只是巡检还没发现）；只要推送罐实测可用，
+    就应该让推送成为代次持有者，而不是守着旧值等下一次 401。
     """
     target = _account()
     svc = _mock_service([target])
@@ -1150,8 +1253,59 @@ async def test_push_overwrites_stale_generation_when_server_never_rotated(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_push_preserves_generation_when_server_rotated_itself(tmp_path):
-    """auth.json 带有 server_rotated 标记（探活/浏览器推进过）时保护服务端代次。"""
+async def test_push_verified_generation_overrides_server_rotated_auth(
+    tmp_path, monkeypatch
+):
+    """推送罐探活通过时，server_rotated 不再是拒绝采纳的理由。"""
+
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
+        return True
+
+    monkeypatch.setattr(
+        "aistudio_api.application.account_health.probe_account_session",
+        fake_probe,
+    )
+    target = _account()
+    svc = _mock_service([target])
+    svc.get_account_auth_path.return_value = _rolling_auth_file(
+        tmp_path, server_rotated=True, ts_value="server-gen-9"
+    )
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    jar = [
+        _cookie("SID", "sid"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("__Secure-1PSIDTS", "fresh-gen"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
+    assert "server_rotated" not in saved
+
+
+@pytest.mark.asyncio
+async def test_push_preserves_generation_when_push_probe_fails(tmp_path, monkeypatch):
+    """推送罐探活明确失败：保留服务端现有代次，不把可用的旧值回滚。"""
+
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
+        return False
+
+    monkeypatch.setattr(
+        "aistudio_api.application.account_health.probe_account_session",
+        fake_probe,
+    )
     target = _account()
     svc = _mock_service([target])
     svc.get_account_auth_path.return_value = _rolling_auth_file(
@@ -1175,8 +1329,112 @@ async def test_push_preserves_generation_when_server_rotated_itself(tmp_path):
     saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
     by_name = {c["name"]: c["value"] for c in saved["cookies"]}
     assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
-    # 推送没有成为代次持有者（被保护了），但也不能留下过期标记
-    assert "server_rotated" not in saved
+
+
+@pytest.mark.asyncio
+async def test_push_keeps_server_generation_when_browser_session_alive(tmp_path):
+    """推送罐可用、服务端浏览器罐也实测有效：滚动代次保持罐优先。
+
+    两边都活着时让推送整体接管会变成两台浏览器互相顶代次；此时只更新
+    长寿命凭据，浏览器罐继续持有滚动代次。
+    """
+    target = _account()
+    svc = _mock_service([target])
+    auth_file = _auth_file_matching_full_jar(tmp_path, ts_value="server-gen-9")
+    svc.get_account_auth_path.return_value = str(auth_file)
+    svc.get_active_account.return_value = target
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    session = MagicMock()
+    session._auth_file = str(auth_file)
+    session.probe_active_session = AsyncMock(return_value=True)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    session.probe_active_session.assert_awaited_once_with("0")
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        str(auth_file), include_rolling=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_replaces_session_when_core_credentials_conflict(tmp_path):
+    """推送带了不同的 SID/PSID（重新登录/另一份会话）：不能只换核心凭据。"""
+    target = _account()
+    svc = _mock_service([target])
+    auth_file = _rolling_auth_file(
+        tmp_path, server_rotated=True, ts_value="server-gen-9"
+    )
+    svc.get_account_auth_path.return_value = str(auth_file)
+    svc.get_active_account.return_value = target
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    session = MagicMock()
+    session._auth_file = str(auth_file)
+    session.probe_active_session = AsyncMock(return_value=True)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        str(auth_file), include_rolling=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_takes_over_generation_when_server_session_dead(tmp_path):
+    """服务端浏览器罐实测已死：即使 expired 标记还没更新，也要接管滚动代次。"""
+    target = _account()
+    svc = _mock_service([target])
+    auth_file = _auth_file_matching_full_jar(tmp_path, ts_value="dead-gen")
+    svc.get_account_auth_path.return_value = str(auth_file)
+    svc.get_active_account.return_value = target
+    runtime_state.account_service = svc
+    runtime_state.rotator = MagicMock()
+
+    session = MagicMock()
+    session._auth_file = str(auth_file)
+    session.probe_active_session = AsyncMock(return_value=False)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        str(auth_file), include_rolling=True
+    )
 
 
 @pytest.mark.asyncio
