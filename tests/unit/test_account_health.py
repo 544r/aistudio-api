@@ -243,7 +243,7 @@ async def test_probe_persist_does_not_mark_server_rotated_for_sidcc_only(
 
 @pytest.mark.asyncio
 async def test_check_all_accounts_updates_rotator(tmp_path, monkeypatch):
-    """巡检只把 401 标记为失效，网络异常保持原状态。"""
+    """巡检对 401 先尝试自救，自救失败才标记失效；网络异常保持原状态。"""
     import aistudio_api.application.account_health as health
 
     def _write_auth(name: str):
@@ -321,6 +321,61 @@ async def test_check_all_accounts_updates_rotator(tmp_path, monkeypatch):
     assert ("acc_valid", False) in calls
     assert ("acc_expired", True) in calls
     assert all(account_id != "acc_disabled" for account_id, _ in calls)
+
+
+@pytest.mark.asyncio
+async def test_check_all_accounts_repairs_401_before_marking_expired(
+    tmp_path, monkeypatch
+):
+    """巡检 401 → RotateCookies 自救成功 → 复检有效，不标记失效。
+
+    没有推送时服务端也要能自己续命，不能等油猴下一次推送。
+    """
+    from unittest.mock import AsyncMock
+
+    from aistudio_api.application import account_orchestrator
+
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        json.dumps({"cookies": [{"name": "SID", "value": "sid"}]}),
+        encoding="utf-8",
+    )
+    account = SimpleNamespace(
+        id="acc_1", enabled=True, auth_user="0", auth_path=auth_file
+    )
+    account_service = SimpleNamespace(
+        list_accounts=lambda: [account],
+        get_active_account=lambda: None,
+        get_auth_path=lambda account_id: auth_file,
+    )
+    calls: list[tuple[str, bool]] = []
+    rotator = SimpleNamespace(
+        set_session_expired=lambda account_id, expired: calls.append(
+            (account_id, expired)
+        )
+    )
+
+    responses = iter([False, True])
+
+    async def fake_probe(cookies, auth_user="0", *, persist_to=None):
+        return next(responses)
+
+    monkeypatch.setattr(health, "probe_account_session", fake_probe)
+    monkeypatch.setattr(health.runtime_state, "client", None)
+    repair = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_orchestrator, "_try_rotate_cookies_repair", repair)
+
+    summary = await check_all_accounts(account_service, rotator)  # type: ignore[arg-type]
+
+    assert summary == {
+        "checked": 1,
+        "valid": 1,
+        "expired": [],
+        "unknown": [],
+    }
+    repair.assert_awaited_once_with("acc_1")
+    assert ("acc_1", False) in calls
+    assert ("acc_1", True) not in calls
 
 
 # ==================== RotateCookies 主动轮换 ====================

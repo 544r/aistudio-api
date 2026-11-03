@@ -18,7 +18,6 @@ from aistudio_api.api.app import (
     _masked_dump_url,
     app,
 )
-from aistudio_api.api.routes_accounts import _rolling_push_snapshot
 from aistudio_api.api.state import runtime_state
 from aistudio_api.application.account_service import AccountService
 from aistudio_api.application.cookie_push_history import CookiePushHistory
@@ -1190,45 +1189,6 @@ def _rolling_auth_file(tmp_path, *, server_rotated: bool, ts_value: str) -> Path
     return auth_file
 
 
-def _auth_file_matching_full_jar(tmp_path, *, ts_value: str) -> Path:
-    """长寿命凭据与 _full_jar 完全一致，只有滚动代次不同。"""
-    cookies = [
-        dict(item)
-        for item in _full_jar()
-        if item["name"]
-        in {
-            "SID",
-            "SAPISID",
-            "__Secure-1PSID",
-            "__Secure-3PSID",
-        }
-    ]
-    cookies.append(
-        {
-            "name": "__Secure-1PSIDTS",
-            "value": ts_value,
-            "domain": ".google.com",
-            "path": "/",
-            "expires": -1,
-            "secure": True,
-            "httpOnly": True,
-        }
-    )
-    auth_file = tmp_path / "auth.json"
-    auth_file.write_text(
-        json.dumps({"cookies": cookies, "origins": []}), encoding="utf-8"
-    )
-    return auth_file
-
-
-def _seed_last_push_rolling(auth_file: Path, jar: list[dict[str, object]]) -> None:
-    """模拟推送方上一次推送的滚动票快照。"""
-    snapshot = _rolling_push_snapshot({"cookies": jar})
-    (auth_file.parent / "push_rolling.json").write_text(
-        json.dumps(snapshot), encoding="utf-8"
-    )
-
-
 @pytest.mark.asyncio
 async def test_push_overwrites_stale_generation_when_push_probe_passes(tmp_path):
     """推送罐探活通过：即便 auth.json 标着 server_rotated，也接受推送的新代次。
@@ -1338,152 +1298,6 @@ async def test_push_preserves_generation_when_push_probe_fails(tmp_path, monkeyp
     saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
     by_name = {c["name"]: c["value"] for c in saved["cookies"]}
     assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
-
-
-@pytest.mark.asyncio
-async def test_push_keeps_server_generation_when_browser_session_alive(tmp_path):
-    """推送罐可用、服务端罐有效、滚动票与上一次推送相同：保持罐优先。
-
-    两边都活着、且推送方浏览器没有发生新的轮换（后台定时推送空转）时，
-    让推送整体接管会变成两台浏览器互相顶代次；此时只更新长寿命凭据。
-    """
-    target = _account()
-    svc = _mock_service([target])
-    auth_file = _auth_file_matching_full_jar(tmp_path, ts_value="server-gen-9")
-    svc.get_account_auth_path.return_value = str(auth_file)
-    svc.get_active_account.return_value = target
-    runtime_state.account_service = svc
-    runtime_state.rotator = MagicMock()
-
-    session = MagicMock()
-    session._auth_file = str(auth_file)
-    session.probe_active_session = AsyncMock(return_value=True)
-    session.apply_pushed_cookies = AsyncMock(return_value=True)
-    runtime_state.client = MagicMock(_session=session)
-
-    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
-    _seed_last_push_rolling(auth_file, jar)
-    async with _client() as client:
-        resp = await client.post(
-            "/api/accounts/push-cookies",
-            json={"cookies": jar, "account_id": "acc_1"},
-        )
-
-    assert resp.status_code == 200
-    session.probe_active_session.assert_awaited_once_with("0")
-    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
-    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
-    assert by_name["__Secure-1PSIDTS"] == "server-gen-9"
-    session.apply_pushed_cookies.assert_awaited_once_with(
-        str(auth_file), include_rolling=False
-    )
-
-
-@pytest.mark.asyncio
-async def test_push_adopts_changed_rolling_when_browser_becomes_active(tmp_path):
-    """浏览器空转几小时后回来：滚动票相对上次推送变了，即使服务端罐还活着也接管。
-
-    后台定时推送的滚动票不会变，走保护分支；用户回来实际使用后 Google 会
-    轮换服务票，这次推送应该让服务端跟上，避免新票被丢掉、旧票随后失效。
-    """
-    target = _account()
-    svc = _mock_service([target])
-    auth_file = _auth_file_matching_full_jar(tmp_path, ts_value="server-gen-9")
-    svc.get_account_auth_path.return_value = str(auth_file)
-    svc.get_active_account.return_value = target
-    runtime_state.account_service = svc
-    runtime_state.rotator = MagicMock()
-
-    session = MagicMock()
-    session._auth_file = str(auth_file)
-    session.probe_active_session = AsyncMock(return_value=True)
-    session.apply_pushed_cookies = AsyncMock(return_value=True)
-    runtime_state.client = MagicMock(_session=session)
-
-    old_jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "old-pushed-gen")]
-    _seed_last_push_rolling(auth_file, old_jar)
-    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
-    async with _client() as client:
-        resp = await client.post(
-            "/api/accounts/push-cookies",
-            json={"cookies": jar, "account_id": "acc_1"},
-        )
-
-    assert resp.status_code == 200
-    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
-    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
-    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
-    session.apply_pushed_cookies.assert_awaited_once_with(
-        str(auth_file), include_rolling=True
-    )
-
-
-@pytest.mark.asyncio
-async def test_push_replaces_session_when_core_credentials_conflict(tmp_path):
-    """推送带了不同的 SID/PSID（重新登录/另一份会话）：不能只换核心凭据。"""
-    target = _account()
-    svc = _mock_service([target])
-    auth_file = _rolling_auth_file(
-        tmp_path, server_rotated=True, ts_value="server-gen-9"
-    )
-    svc.get_account_auth_path.return_value = str(auth_file)
-    svc.get_active_account.return_value = target
-    runtime_state.account_service = svc
-    runtime_state.rotator = MagicMock()
-
-    session = MagicMock()
-    session._auth_file = str(auth_file)
-    session.probe_active_session = AsyncMock(return_value=True)
-    session.apply_pushed_cookies = AsyncMock(return_value=True)
-    runtime_state.client = MagicMock(_session=session)
-
-    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
-    async with _client() as client:
-        resp = await client.post(
-            "/api/accounts/push-cookies",
-            json={"cookies": jar, "account_id": "acc_1"},
-        )
-
-    assert resp.status_code == 200
-    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
-    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
-    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
-    session.apply_pushed_cookies.assert_awaited_once_with(
-        str(auth_file), include_rolling=True
-    )
-
-
-@pytest.mark.asyncio
-async def test_push_takes_over_generation_when_server_session_dead(tmp_path):
-    """服务端浏览器罐实测已死：即使 expired 标记还没更新，也要接管滚动代次。"""
-    target = _account()
-    svc = _mock_service([target])
-    auth_file = _auth_file_matching_full_jar(tmp_path, ts_value="dead-gen")
-    svc.get_account_auth_path.return_value = str(auth_file)
-    svc.get_active_account.return_value = target
-    runtime_state.account_service = svc
-    runtime_state.rotator = MagicMock()
-
-    session = MagicMock()
-    session._auth_file = str(auth_file)
-    session.probe_active_session = AsyncMock(return_value=False)
-    session.apply_pushed_cookies = AsyncMock(return_value=True)
-    runtime_state.client = MagicMock(_session=session)
-
-    jar = [*_full_jar(), _cookie("__Secure-1PSIDTS", "fresh-gen")]
-    async with _client() as client:
-        resp = await client.post(
-            "/api/accounts/push-cookies",
-            json={"cookies": jar, "account_id": "acc_1"},
-        )
-
-    assert resp.status_code == 200
-    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
-    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
-    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
-    session.apply_pushed_cookies.assert_awaited_once_with(
-        str(auth_file), include_rolling=True
-    )
 
 
 @pytest.mark.asyncio

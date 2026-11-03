@@ -327,36 +327,3 @@ async def test_reload_with_persist_serializes_injection_and_save():
     )
     save.assert_awaited_once()
     assert save.await_args.kwargs["_lock_held"] is True
-
-
-@pytest.mark.asyncio
-async def test_probe_active_session_uses_browser_jar(monkeypatch):
-    from types import SimpleNamespace
-
-    session = BrowserSession(port=9222)
-    page = _page_with_cookies(
-        [
-            {"name": "SID", "value": "sid-live", "domain": ".google.com", "path": "/"},
-            {
-                "name": "SAPISID",
-                "value": "sapi-live",
-                "domain": ".google.com",
-                "path": "/",
-            },
-        ]
-    )
-    session._gate = MagicMock(active_context=SimpleNamespace(page=page))
-    captured: dict[str, str] = {}
-
-    async def fake_probe(cookies, auth_user="0", *, timeout=8.0):
-        captured.update(cookies)
-        assert auth_user == "1"
-        return True
-
-    monkeypatch.setattr(
-        "aistudio_api.application.account_health.probe_account_session",
-        fake_probe,
-    )
-
-    assert await session.probe_active_session("1") is True
-    assert captured == {"SID": "sid-live", "SAPISID": "sapi-live"}

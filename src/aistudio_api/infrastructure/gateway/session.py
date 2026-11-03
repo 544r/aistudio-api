@@ -493,7 +493,9 @@ class BrowserSession:
                     hash_parts.append("")
         prompt = " ".join(hash_parts)
         content_hash = sha256(prompt.encode("utf-8")).hexdigest()
-        log.debug("开始计算内容快照: hash=%s, prompt_len=%d", content_hash[:8], len(prompt))
+        log.debug(
+            "开始计算内容快照: hash=%s, prompt_len=%d", content_hash[:8], len(prompt)
+        )
         async with self._snapshot_lock:
             args = build_snapshot_args(prompt=prompt, content_hash=content_hash)
             for attempt in range(3):
@@ -507,7 +509,11 @@ class BrowserSession:
                     elif isinstance(raw_res, str):
                         snapshot = raw_res
                     if snapshot:
-                        log.debug("内容快照计算完成: hash=%s, 长度=%d", content_hash[:8], len(snapshot))
+                        log.debug(
+                            "内容快照计算完成: hash=%s, 长度=%d",
+                            content_hash[:8],
+                            len(snapshot),
+                        )
                         return snapshot
                 except Exception as e:
                     log.debug("计算内容快照失败: 尝试=%d, 错误=%s", attempt + 1, e)
@@ -709,33 +715,6 @@ class BrowserSession:
         page = ctx.page if ctx is not None else None
         return await self._apply_cookies_and_persist(
             page, auth_file, include_rolling=include_rolling
-        )
-
-    async def probe_active_session(self, auth_user: str = "0") -> bool | None:
-        """用浏览器当前罐实测登录态（只读，不写盘）。
-
-        推送时用来判断服务端自己的会话是不是还活着：如果活着，滚动代次继续
-        由浏览器罐持有，推送只更新长寿命凭据；如果已经死了（或无法确认），
-        才让推送接管滚动代次。这样既不会让推送无效，也不会让两边互相顶代数。
-        """
-        page = self.page
-        if page is None or page.is_closed():
-            return None
-        try:
-            cookies = await page.get_cookies()
-        except Exception:
-            return None
-        cookie_dict = {
-            str(item.get("name") or ""): str(item.get("value") or "")
-            for item in cookies
-            if isinstance(item, dict) and item.get("name") and item.get("value")
-        }
-        if not cookie_dict:
-            return None
-        from aistudio_api.application.account_health import probe_account_session
-
-        return await probe_account_session(
-            cookie_dict, auth_user=auth_user, timeout=6.0
         )
 
     async def save_active_cookies(self, *, force: bool = True) -> bool:

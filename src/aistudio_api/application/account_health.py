@@ -29,6 +29,7 @@ from aistudio_api.infrastructure.utils.logger import get_logger
 if TYPE_CHECKING:
     from aistudio_api.application.account_rotator import AccountRotator
     from aistudio_api.application.account_service import AccountService
+    from aistudio_api.infrastructure.account.account_store import AccountMeta
 
 logger = get_logger("account_health")
 
@@ -335,6 +336,43 @@ async def probe_account_session(
     return None
 
 
+async def _repair_after_401(
+    account: AccountMeta, account_service: AccountService
+) -> bool | None:
+    """巡检拿到 401 时先尝试 RotateCookies 自救，再决定是否判失效。
+
+    返回 True：自救后复检有效；False：自救失败或复检仍 401；None：自救成功
+    但复检网络未知（保持原判，交给下一轮巡检）。没有推送时服务端也能靠这条
+    路径自己把滚动代次续上，不再只能等油猴下一次推送。
+    """
+    path = account_service.get_auth_path(account.id)
+    if path is None:
+        return False
+    from aistudio_api.application.account_orchestrator import (
+        _try_rotate_cookies_repair,
+    )
+
+    logger.warning("账号 %s 巡检返回 401，尝试 RotateCookies 自救", account.id)
+    try:
+        repaired = await _try_rotate_cookies_repair(account.id)
+    except Exception as exc:
+        logger.debug("账号 %s RotateCookies 自救异常: %s", account.id, exc)
+        return False
+    if not repaired:
+        return False
+    try:
+        cookies = parse_raw_cookies(path.read_text(encoding="utf-8"))
+        recheck = await probe_account_session(
+            cookies, account.auth_user, persist_to=path
+        )
+    except Exception as exc:
+        logger.debug("账号 %s 自救后复检失败: %s", account.id, exc)
+        return None
+    if recheck is True:
+        logger.info("账号 %s 巡检 401 自救成功", account.id)
+    return recheck
+
+
 async def check_all_accounts(
     account_service: AccountService,
     rotator: AccountRotator,
@@ -390,8 +428,17 @@ async def check_all_accounts(
             valid += 1
             rotator.set_session_expired(account.id, False)
         elif status is False:
-            expired.append(account.id)
-            rotator.set_session_expired(account.id, True)
+            # 401 不等于账号死了：先用长寿根凭据换一代滚动票，能救回来就
+            # 不判失效。没有推送时这是服务端自己的续命路径。
+            repaired = await _repair_after_401(account, account_service)
+            if repaired is True:
+                valid += 1
+                rotator.set_session_expired(account.id, False)
+            elif repaired is None:
+                unknown.append(account.id)
+            else:
+                expired.append(account.id)
+                rotator.set_session_expired(account.id, True)
         else:
             unknown.append(account.id)
 
