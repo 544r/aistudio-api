@@ -4,13 +4,16 @@ services:
     container_name: aistudio-api
     restart: unless-stopped
     ports:
-      - "8080:8080"    # API server
+      - "127.0.0.1:8080:8080"    # API server（仅本机，由 nginx 反代对外）
       # - "9222:9222"  # Optional: expose only when debugging browser
     volumes:
       - ./data:/app/data           # Account data, stats.json and rotator_state.json persistence
-      - ./config.yaml:/app/config.yaml  # Model configuration file
+      # 运行时配置独立于仓库模板：git 重置/升级不会覆盖 API Key 等服务器本地设置。
+      # 文件不存在时应用会自动从模板创建。
+      - ./config.runtime.yaml:/app/config.yaml
       - ./.env:/app/.env:ro        # Environment config (read-only)
     environment:
+      - TZ=Asia/Shanghai
       - AISTUDIO_PORT=8080
       - AISTUDIO_BROWSER_PORT=9222
       - AISTUDIO_BROWSER_HEADLESS=1

@@ -16,6 +16,7 @@ dumps/
 .vscode/
 !docs/BOTGUARD_VERIFICATION_CHAIN.md
 .env
+config.runtime.yaml
 uv.toml
 .uv.toml
 uv.lock
