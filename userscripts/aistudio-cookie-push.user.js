@@ -117,7 +117,7 @@
     const STORE_REFRESH_MIN = "ap_refresh_min";
     const STORE_LAST_REFRESH = "ap_last_refresh";
 
-    const SCRIPT_VERSION = "1.3.2";
+    const SCRIPT_VERSION = "1.3.3";
     const GITHUB_RAW_URL =
         "https://raw.githubusercontent.com/544r/aistudio-api/master/userscripts/aistudio-cookie-push.user.js";
     const UPDATE_FETCH_TIMEOUT_MS = 15000;

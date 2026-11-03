@@ -1301,6 +1301,64 @@ async def test_push_preserves_generation_when_push_probe_fails(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_push_adopts_generation_when_probe_unknown(tmp_path, monkeypatch):
+    """探活网络未知不等于推送失效：推送仍应接管服务端代次。
+
+    用户浏览器里的罐子是最新的事实来源；服务端偶尔连不上 Google 时，
+    不能因此把推送的新滚动票丢掉、继续守着可能已死的旧代次。
+    """
+
+    async def fake_probe(
+        _cookies, auth_user="0", *, timeout=8.0, persist_to=None, set_cookie_sink=None
+    ):
+        return None
+
+    monkeypatch.setattr(
+        "aistudio_api.application.account_health.probe_account_session",
+        fake_probe,
+    )
+    target = _account()
+    svc = _mock_service([target])
+    auth_file = _rolling_auth_file(
+        tmp_path, server_rotated=True, ts_value="server-gen-9"
+    )
+    svc.get_account_auth_path.return_value = auth_file
+    svc.get_active_account.return_value = target
+    runtime_state.account_service = svc
+    rotator = MagicMock()
+    rotator.get_account_stats.return_value = SimpleNamespace(session_expired=False)
+    runtime_state.rotator = rotator
+
+    session = MagicMock()
+    session._auth_file = str(auth_file)
+    session.apply_pushed_cookies = AsyncMock(return_value=True)
+    runtime_state.client = MagicMock(_session=session)
+
+    jar = [
+        _cookie("SID", "sid"),
+        _cookie("SAPISID", "sapisid-value"),
+        _cookie("__Secure-1PSIDTS", "fresh-gen"),
+    ]
+    async with _client() as client:
+        resp = await client.post(
+            "/api/accounts/push-cookies",
+            json={"cookies": jar, "account_id": "acc_1"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["session_valid"] is None
+    saved = svc.save_account_from_cookies.call_args.kwargs["storage_state"]
+    by_name = {c["name"]: c["value"] for c in saved["cookies"]}
+    assert by_name["__Secure-1PSIDTS"] == "fresh-gen"
+    assert "server_rotated" not in saved
+    session.apply_pushed_cookies.assert_awaited_once_with(
+        auth_file, include_rolling=True
+    )
+    # 网络未知不等于失效：不能改调度器里的登录态标记
+    rotator.set_session_expired.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_push_jar_with_accounts_domain_cookies_roundtrip():
     """油猴 v1.3.1 起 accounts.google.com 域的 LSID / __Host-*PLSID 随罐推送。
 
